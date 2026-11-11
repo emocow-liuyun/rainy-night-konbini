@@ -17,12 +17,7 @@ import {
 } from './effects.js';
 import { buildSky, buildCityGlow, buildHorizonHaze } from './atmos.js';
 import { batchStatic } from './batch.js';
-import {
-  Pedestrian, scriptCommuter, scriptBrowser, scriptCrosser,
-  scriptSideStreet, scriptVending, scriptPasserby, scriptLoaiter,
-  makeVehicle,
-} from './life.js';
-import { buildFigure } from './figure.js';
+import { makeVehicle } from './life.js';
 import { toon, glowMat, box, canvasTex, JP_FONT, TEX_STATE } from './core.js';
 
 const QS = new URLSearchParams(location.search);
@@ -69,7 +64,7 @@ controls.maxDistance = 70;
 controls.minPolarAngle = 0.10;
 controls.maxPolarAngle = Math.PI * 0.478;
 controls.screenSpacePanning = false;
-controls.autoRotate = true;
+controls.autoRotate = !QS.has('still');
 controls.autoRotateSpeed = 0.30;
 controls.update();
 
@@ -434,72 +429,15 @@ const batchInfo = batchStatic(world, { verbose: true, exclude: protectFromBatch 
 console.log('[batch] draw-call reduction:', batchInfo);
 
 /* =========================================================
-   4.6 常驻行人与过路车辆
+   4.6 过路车辆
        必须在合批之后创建：它们要独立运动，不能并入静态几何
    ========================================================= */
 const lifeRoot = new THREE.Group();
 lifeRoot.name = 'life';
 world.add(lifeRoot);
 
-const walkers = [];
 const vehicles = [];
-
-/* --- 行人：7 位，各有独立行为剧本 --- */
-const WALK_Y = 0.16;
 const ROAD_Y = 0.03;
-
-/* 外观配置：夜间的通勤色，皮肤/发色随机化 */
-const PED_LOOKS = {
-  commuterA: {
-    coat: 0x2f3a4d, pants: 0x1f242c, skin: 0xdcb295, hair: 0x1a1715,
-    umbrella: 0x2c4a6e, bag: true,
-  },
-  browserA: {
-    coat: 0x4a3a2e, pants: 0x232830, skin: 0xe8c4a8, hair: 0x2b2118,
-    umbrella: null, bag: true, scarf: 0x6b3a3a,
-  },
-  crosserA: {
-    coat: 0x33384a, pants: 0x2a2f38, skin: 0xf0cfb4, hair: 0x14110f,
-    umbrella: 0x6e3a44, hat: false,
-  },
-  sideA: {
-    coat: 0x2a3b36, pants: 0x1f242c, skin: 0xc99a7a, hair: 0x3d2b1c,
-    umbrella: 0x384a3a, hat: true, bag: true,
-  },
-  vendingA: {
-    coat: 0x5a4636, pants: 0x232830, skin: 0xdcb295, hair: 0x1a1715,
-    umbrella: null, bag: false,
-  },
-  passerA: {
-    coat: 0x3d3346, pants: 0x2a2f38, skin: 0xe8c4a8, hair: 0x2b2118,
-    umbrella: 0x4a3a6b,
-  },
-  loiterA: {
-    coat: 0x2b3340, pants: 0x1f242c, skin: 0xf0cfb4, hair: 0x14110f,
-    umbrella: null, bag: true, scarf: 0x3a4a3a,
-  },
-};
-
-function spawnPed(name, lookKey, scriptFn, startX, startZ, facing, speed) {
-  const fig = buildFigure(PED_LOOKS[lookKey]);
-  const p = new Pedestrian(lifeRoot, {
-    name,
-    figure: fig,
-    startX, startZ, facing,
-    speed,
-    script: scriptFn(),
-  });
-  walkers.push(p);
-  return p;
-}
-
-spawnPed('commuterA', 'commuterA', scriptCommuter, 9.0, 2.62, -Math.PI / 2, 1.12);
-spawnPed('browserA', 'browserA', scriptBrowser, -8.6, 2.58, Math.PI / 2, 1.02);
-spawnPed('crosserA', 'crosserA', scriptCrosser, -1.4, -1.0, 0, 1.18);
-spawnPed('sideA', 'sideA', scriptSideStreet, -3.55, -8.0, 0, 1.06);
-spawnPed('vendingA', 'vendingA', scriptVending, 9.0, 2.58, -Math.PI / 2, 1.10);
-spawnPed('passerA', 'passerA', scriptPasserby, -8.8, 8.82, Math.PI / 2, 1.05);
-spawnPed('loiterA', 'loiterA', scriptLoaiter, 3.4, 2.55, 0.4, 1.08);
 
 /* --- 车辆：前街两个方向 + 侧街 --- */
 const LANE_Z = (LAYOUT.roadZ[0] + LAYOUT.roadZ[1]) / 2;
@@ -540,7 +478,7 @@ vehicles.push(makeVehicle(lifeRoot, {
   speed: 2.8, y: ROAD_Y, variant: 'sedan', body: 0xb8bcc2, offset: 0.68,
 }));
 
-/* 行人与车辆不进平面反射（会随反射刷新产生鬼影） */
+/* Moving traffic is excluded from the planar reflection pass. */
 hideInReflection.push(lifeRoot);
 
 
@@ -707,6 +645,7 @@ const compositeMat = new THREE.ShaderMaterial({
 });
 
 function initTargets() {
+  for (const target of [rtScene, rtNormal, rtBright1, rtBright2, rtBloom1, rtBloom2]) target?.dispose();
   const pr = renderer.getPixelRatio();
   const w = Math.floor(window.innerWidth * pr);
   const h = Math.floor(window.innerHeight * pr);
@@ -878,8 +817,7 @@ function animate() {
   }
 
 
-  /* --- 行人与车辆 --- */
-  for (let i = 0; i < walkers.length; i++) walkers[i].update(dt, t);
+  /* --- 车辆 --- */
   for (let i = 0; i < vehicles.length; i++) vehicles[i].update(dt);
 
   wetLayerMat.uniforms.uTime.value = t;
@@ -956,7 +894,7 @@ function animate() {
 /* 调试句柄：仅 ?debug=1 时暴露，供外部诊断 draw call / 分段耗时 */
 if (QS.has('debug')) {
   window.__KONBINI = {
-    renderer, scene, camera, controls, compositeMat, wetLayerMat, normalMat, walkers, vehicles,
+    renderer, scene, camera, controls, compositeMat, wetLayerMat, normalMat, vehicles,
     info: () => ({
       calls: renderer.info.render.calls,
       triangles: renderer.info.render.triangles,

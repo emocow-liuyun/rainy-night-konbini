@@ -52,16 +52,7 @@
   </div>
 </div>
 
-<!--
-  用动态 import() 加载主模块，而不是 <script type="module" src>。
-
-  原因：<script type="module"> 的依赖图解析会阻塞文档解析。当模块图较深
-  （8 个 JS + 200KB 的 three.js）走 CDN 时，任何一个请求慢一拍，浏览器就
-  会卡在 readyState="interactive"，脚本永远不执行，而且不会抛任何错误
-  —— 页面上就是一片黑，控制台干净得像什么都没发生。
-
-  动态 import() 不阻塞解析，还能 try/catch，失败了可以重试。
--->
+<!-- Local ES modules, parallel preloading, and visible loading feedback. -->
 <script type="module">
   const boot = document.getElementById('boot');
   const bootMsg = document.getElementById('bootMsg');

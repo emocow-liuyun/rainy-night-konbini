@@ -25,7 +25,7 @@ A 20 × 20 square miniature base. In the middle sits a Japanese convenience stor
 
 Outside is cold blue, wet and quiet. Inside is warm white, cluttered and lived-in. That contrast is the whole emotional point of the piece.
 
-Everything moves just enough to breathe — rain keeps falling, the sign flickers like an old tube, the automatic door opens by itself every so often, water slides down the glass, the wet asphalt holds vertical streaks of every lamp.
+Rain keeps falling, water slides down the glass, and wet asphalt holds vertical streaks of every lamp. Occasional sedans, kei cars, vans and taxis pass the corner, with quiet gaps between trips. No pedestrian models, walking logic or navigation modules are loaded.
 
 ---
 
@@ -118,7 +118,7 @@ The reflective surface is layered at three ground heights (asphalt `0.014`, lot 
 | Rain splashes | Shader-driven ring bursts, randomised period and position |
 | Eave drips | Instanced droplets, gravitational acceleration, stretched along Y |
 | Puddle ripples | Ring texture expanding with a quadratic fade |
-| Sign flicker | Three summed sine frequencies plus occasional dropouts (old tube behaviour) |
+| Sign | Steady lightbox emission and bloom |
 | Automatic door | Random intervals, eased translation of both glass leaves |
 | Glass runoff | Scrolling UVs over a procedural droplet texture |
 | Ground reflection | Mirrored render every frame, time-perturbed |
@@ -132,7 +132,7 @@ The reflective surface is layered at three ground heights (asphalt `0.014`, lot 
 
 ```
 rainy-night-konbini/
-├── index.html              entry point (ESM import map)
+├── index.html              entry point (native ESM)
 ├── serve.py                local preview server
 ├── vendor/
 │   ├── three.module.js          three.js r170
@@ -169,30 +169,9 @@ Camera override via query string:
 
 ## Performance
 
-### The interesting part
+The scene batches static geometry and reuses materials. Cars are merged per vehicle; no pedestrian simulation is loaded. Reflection and outline buffers refresh every frame. Adaptive resolution lowers the pixel ratio on sustained slow frames.
 
-The first version rendered at a smooth 60 fps while pinning a CPU core — and barely touching the GPU. That combination is a tell: the bottleneck was submission, not pixels.
-
-Profiling confirmed it. The GPU was idling at ~3%, while `getParameters()` inside three.js ate roughly 25% of CPU samples — the bookkeeping three.js does per material, per frame, to decide which shader program to bind.
-
-Two causes, both fixed:
-
-1. **Every shelf tier cloned its own material.** A `.clone()` on a material mints a new UUID, so three.js treats it as a distinct program candidate and re-derives its parameter object every frame. Replacing the clones with six quantised shared variants made that cost vanish.
-2. **900+ independent meshes.** Each one is a draw call. Static geometry is now merged by material, with world transforms baked into the vertices.
-
-| Metric | Before | After |
-|---|---|---|
-| Draw calls / frame | 2,595 | **449** |
-| Meshes in scene | 914 | **378** |
-| Realtime point lights | 19 | **10** |
-| CPU main-thread busy | 44% | **27%** |
-| Frame rate | 60 fps | 60 fps |
-
-### What else changed
-
-- **Static batching** (`src/batch.js`) — merges by material into 38 batches. Only genuinely animated objects are excluded: the automatic door leaves, the sign face, the traffic lamps, interior point lights, distant window glow. Transparent additive quads with `depthWrite === false` are safe to batch too, since additive blending is order-independent.
-- **Lights 19 → 10** — street lamps, the traffic light, vending machines and the rear-door lamp no longer use realtime point lights. They're carried by emissive materials, additive light-pool decals and bloom. Ground pools and interior emissive fills were strengthened to compensate, so the look is unchanged.
-- **Staggered passes** — wet-ground reflection refreshes every 2 frames, the normal/depth buffer (used for outlines) every 3. The geometry and lights are effectively static, so redrawing the whole scene every frame was pure waste.
+Historical profiling numbers are omitted because they describe earlier versions, not this configuration.
 
 ### Tunables
 
