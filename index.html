@@ -46,6 +46,22 @@
     if (boot) boot.innerHTML = '<div style="color:#7b8ea8;font:12px/1.6 ui-monospace,monospace;text-align:center">' + msg + '</div>';
   };
 
+  /* 并行预取：浏览器按 import 图串行发现依赖，深图会一轮轮等。
+     先用 <link rel=modulepreload> 把整张图并行拉下来，import() 时
+     就已经在缓存里了。 */
+  const MODULES = [
+    './src/main.js', './src/core.js', './src/base.js', './src/store.js',
+    './src/props.js', './src/effects.js', './src/atmos.js', './src/batch.js',
+    './src/life.js', './vendor/three.module.js',
+    './vendor/OrbitControls.js', './vendor/BufferGeometryUtils.js',
+  ];
+  for (const href of MODULES) {
+    const l = document.createElement('link');
+    l.rel = 'modulepreload';
+    l.href = href;
+    document.head.appendChild(l);
+  }
+
   async function load(attempt = 1) {
     try {
       await import('./src/main.js');
