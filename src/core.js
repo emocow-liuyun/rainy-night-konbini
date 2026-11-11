@@ -194,6 +194,17 @@ export function noReflect(obj) { return setLayer(obj, LAYER.NO_REFLECT); }
 /* ---------------- Canvas 贴图 ---------------- */
 export const JP_FONT = '"Noto Sans CJK JP","Noto Sans JP","Hiragino Kaku Gothic ProN","Yu Gothic",sans-serif';
 
+/* 全局各向异性上限，由 main.js 在拿到 renderer 后写入 */
+export const TEX_STATE = { maxAnisotropy: 8 };
+
+/**
+ * 程序化 Canvas 贴图。
+ *
+ * 关键点：必须生成 mipmap 并使用三线性 + 各向异性过滤。
+ * 没有 mipmap 时，远处或斜视的表面每个像素只采样一个纹素，
+ * 相邻帧的采样点跳动会让货架、招牌、贩卖机贴图剧烈闪烁 ——
+ * 这是「贴图不稳定」最典型的成因。
+ */
 export function canvasTex(w, h, draw, opts = {}) {
   const cv = document.createElement('canvas');
   cv.width = w; cv.height = h;
@@ -201,9 +212,17 @@ export function canvasTex(w, h, draw, opts = {}) {
   draw(ctx, w, h);
   const tex = new THREE.CanvasTexture(cv);
   tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 8;
-  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
-  if (opts.repeat) { tex.wrapS = tex.wrapT = THREE.RepeatWrapping; tex.repeat.set(opts.repeat[0], opts.repeat[1]); }
+
+  const repeat = opts.repeat;
+  tex.wrapS = tex.wrapT = repeat ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping;
+  if (repeat) tex.repeat.set(repeat[0], repeat[1]);
+
+  // mipmap + 三线性过滤 + 各向异性：消除远处/斜面的纹理走样
+  tex.generateMipmaps = true;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.anisotropy = TEX_STATE.maxAnisotropy;
+
   tex.needsUpdate = true;
   return tex;
 }

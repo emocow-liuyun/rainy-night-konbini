@@ -17,7 +17,8 @@ import {
 } from './effects.js';
 import { buildSky, buildCityGlow, buildHorizonHaze } from './atmos.js';
 import { batchStatic } from './batch.js';
-import { toon, glowMat, box, canvasTex, JP_FONT } from './core.js';
+import { makeWalker, makeVehicle } from './life.js';
+import { toon, glowMat, box, canvasTex, JP_FONT, TEX_STATE } from './core.js';
 
 const QS = new URLSearchParams(location.search);
 const qf = (k, d) => (QS.has(k) ? parseFloat(QS.get(k)) : d);
@@ -30,8 +31,12 @@ const canvas = document.createElement('canvas');
 document.body.appendChild(canvas);
 
 const renderer = new THREE.WebGLRenderer({
-  canvas, antialias: false, alpha: false, powerPreference: 'high-performance', stencil: false,
+  canvas, antialias: true, alpha: false, powerPreference: 'high-performance', stencil: false,
 });
+/* 各向异性上限：让斜视的贴图（货架、招牌、路面）不再闪烁 */
+TEX_STATE.maxAnisotropy = renderer.capabilities.getMaxAnisotropy();
+console.log('[tex] maxAnisotropy =', TEX_STATE.maxAnisotropy);
+
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -424,6 +429,118 @@ const batchInfo = batchStatic(world, { verbose: true, exclude: protectFromBatch 
 console.log('[batch] draw-call reduction:', batchInfo);
 
 /* =========================================================
+   4.6 常驻行人与过路车辆
+       必须在合批之后创建：它们要独立运动，不能并入静态几何
+   ========================================================= */
+const lifeRoot = new THREE.Group();
+lifeRoot.name = 'life';
+world.add(lifeRoot);
+
+const walkers = [];
+const vehicles = [];
+
+/* --- 行人路径（世界坐标 [x,z]）--- */
+const WALK_Y = 0.16;          // 人行道面高
+const ROAD_Y = 0.03;
+
+/* A. 店前人行道上往返的行人（沿前街北侧，z≈2.6） */
+walkers.push(makeWalker(lifeRoot, [
+  [-4.2, 2.62], [2.2, 2.62], [6.8, 2.66], [9.2, 2.62],
+  [6.8, 2.50], [2.2, 2.50], [-4.2, 2.50], [-4.2, 2.62],
+], {
+  speed: 1.02, y: WALK_Y, pauseAt: 0.06,
+  personOpts: { coat: 0x2f3a4d, pants: 0x1f242c, umbrella: 0x2c4a6e, bag: true },
+}));
+
+/* B. 打伞的上班族，从侧街走到店门口再折返 */
+walkers.push(makeWalker(lifeRoot, [
+  [-3.6, -8.6], [-3.6, -1.0], [-3.55, 1.6], [-2.2, 2.55],
+  [1.0, 2.55], [0.4, 2.66], [-2.2, 2.50], [-3.55, 1.4],
+  [-3.6, -1.4], [-3.6, -8.6],
+], {
+  speed: 0.92, y: WALK_Y, pauseAt: 0.10,
+  personOpts: { coat: 0x3d3346, pants: 0x2a2f38, umbrella: 0x6e3a44, hat: true },
+}));
+
+/* C. 对面人行道上的行人（z≈8.8） */
+walkers.push(makeWalker(lifeRoot, [
+  [9.0, 8.78], [-2.0, 8.74], [-8.4, 8.78],
+  [-2.0, 8.92], [9.0, 8.94],
+], {
+  speed: 1.12, y: WALK_Y, pauseAt: 0.04,
+  personOpts: { coat: 0x2a3b36, pants: 0x1f242c, umbrella: null, bag: true },
+}));
+
+/* D. 站在店门口不动的顾客（看橱窗） */
+{
+  const w = makeWalker(lifeRoot, [[3.15, 2.45], [3.16, 2.46]], {
+    speed: 0, y: WALK_Y,
+    personOpts: { coat: 0x4a3a2e, pants: 0x232830, umbrella: 0x384a3a, bag: true },
+  });
+  w.paused = true;
+  w.pauseTimer = 1e9;   // 常驻
+  w.person.root.rotation.y = Math.PI * 0.95;
+  w.person.root.position.set(3.15, WALK_Y, 2.45);
+  walkers.push(w);
+}
+
+/* E. 在自动贩卖机前的人 */
+{
+  const w = makeWalker(lifeRoot, [[6.0, 2.15], [6.01, 2.16]], {
+    speed: 0, y: WALK_Y,
+    personOpts: { coat: 0x33384a, pants: 0x2a2f38, umbrella: null, hat: true },
+  });
+  w.paused = true;
+  w.pauseTimer = 1e9;
+  w.person.root.rotation.y = -Math.PI * 0.5;
+  w.person.root.position.set(6.0, WALK_Y, 2.15);
+  walkers.push(w);
+}
+
+/* --- 车辆：前街两个方向 + 侧街 --- */
+const LANE_Z = (LAYOUT.roadZ[0] + LAYOUT.roadZ[1]) / 2;
+const LANE_X = (LAYOUT.roadX[0] + LAYOUT.roadX[1]) / 2;
+
+/* 前街：东向车道靠南，西向车道靠北，各自一条 */
+const E_LANE = LANE_Z + 1.15;
+const W_LANE = LANE_Z - 1.15;
+
+/* 同车道两辆车间距要够（车长 ~2.3，速度差不宜过大） */
+vehicles.push(makeVehicle(lifeRoot, {
+  lane: { from: [-9.0, E_LANE], to: [9.0, E_LANE] },
+  speed: 3.2, y: ROAD_Y, variant: 'sedan', body: 0xd8dde3, offset: 0.06,
+}));
+vehicles.push(makeVehicle(lifeRoot, {
+  lane: { from: [-9.0, E_LANE], to: [9.0, E_LANE] },
+  speed: 3.2, y: ROAD_Y, variant: 'taxi', body: 0x2a2e36, offset: 0.58,
+}));
+
+vehicles.push(makeVehicle(lifeRoot, {
+  lane: { from: [9.0, W_LANE], to: [-9.0, W_LANE] },
+  speed: 3.0, y: ROAD_Y, variant: 'van', body: 0x3a4a3f, offset: 0.20,
+}));
+vehicles.push(makeVehicle(lifeRoot, {
+  lane: { from: [9.0, W_LANE], to: [-9.0, W_LANE] },
+  speed: 3.0, y: ROAD_Y, variant: 'sedan', body: 0x8c3a3a, offset: 0.72,
+}));
+
+/* 侧街：南向 / 北向，只在前街以北的段落行驶，避免穿模 */
+const S_LANE = LANE_X - 0.95;
+const N_LANE = LANE_X + 0.95;
+vehicles.push(makeVehicle(lifeRoot, {
+  lane: { from: [N_LANE, -8.6], to: [N_LANE, 2.4] },
+  speed: 2.6, y: ROAD_Y, variant: 'kei', body: 0x2f4a6b, offset: 0.35,
+}));
+vehicles.push(makeVehicle(lifeRoot, {
+  lane: { from: [S_LANE, 2.4], to: [S_LANE, -8.6] },
+  speed: 2.8, y: ROAD_Y, variant: 'sedan', body: 0xb8bcc2, offset: 0.68,
+}));
+
+/* 行人与车辆不进平面反射（会随反射刷新产生鬼影） */
+hideInReflection.push(lifeRoot);
+
+
+/* =========================================================
    5. 后处理：法线/深度描边 + 泛光 + 调色
    ========================================================= */
 let rtScene, rtNormal, rtBright1, rtBright2, rtBloom1, rtBloom2;
@@ -595,7 +712,9 @@ function initTargets() {
     colorSpace: THREE.NoColorSpace,
   };
   rtScene = new THREE.WebGLRenderTarget(w, h, { ...opt, samples: 4 });
-  rtNormal = new THREE.WebGLRenderTarget(w, h, { ...opt, samples: 0 });
+  /* 法线缓冲必须抗锯齿：它是描边的输入，
+     单采样会让边缘判定在相邻帧整条翻转。 */
+  rtNormal = new THREE.WebGLRenderTarget(w, h, { ...opt, samples: 4 });
   const bw = Math.max(2, w >> 2), bh = Math.max(2, h >> 2);
   rtBright1 = new THREE.WebGLRenderTarget(bw, bh, opt);
   rtBright2 = new THREE.WebGLRenderTarget(bw, bh, opt);
@@ -754,6 +873,11 @@ function animate() {
     });
   }
 
+
+  /* --- 行人与车辆 --- */
+  for (let i = 0; i < walkers.length; i++) walkers[i].update(dt);
+  for (let i = 0; i < vehicles.length; i++) vehicles[i].update(dt);
+
   wetLayerMat.uniforms.uTime.value = t;
 
   /* --- 渲染 --- */
@@ -828,7 +952,7 @@ function animate() {
 /* 调试句柄：仅 ?debug=1 时暴露，供外部诊断 draw call / 分段耗时 */
 if (QS.has('debug')) {
   window.__KONBINI = {
-    renderer, scene, camera, controls, compositeMat, wetLayerMat, normalMat,
+    renderer, scene, camera, controls, compositeMat, wetLayerMat, normalMat, walkers, vehicles,
     info: () => ({
       calls: renderer.info.render.calls,
       triangles: renderer.info.render.triangles,
