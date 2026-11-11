@@ -7,7 +7,7 @@
      · 店前人行道：z 2.0…3.2
      · 对面人行道：z 8.2…9.4
    ========================================================= */
-import * as THREE from 'three';
+import * as THREE from '../vendor/three.module.js';
 import {
   C, toon, glowMat, box, slab, add, planeGeo, boxGeo, cyl, group,
   canvasTex, contactShadow, JP_FONT,

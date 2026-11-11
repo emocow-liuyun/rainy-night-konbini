@@ -1,7 +1,7 @@
 /* =========================================================
    atmos.js — 夜空穹顶 / 云层 / 远景城市剪影 / 地面雾霾
    ========================================================= */
-import * as THREE from 'three';
+import * as THREE from '../vendor/three.module.js';
 import { canvasTex, toon, glowMat, box, add, planeGeo, group } from './core.js';
 
 /* ---------------- 夜空穹顶（雨云渐变） ---------------- */

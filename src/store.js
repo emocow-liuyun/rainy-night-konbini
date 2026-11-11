@@ -2,7 +2,7 @@
    store.js — 便利店建筑 + 完整店内陈设
    店面朝向 +Z（前街），玻璃幕墙在 z = 1.20
    ========================================================= */
-import * as THREE from 'three';
+import * as THREE from '../vendor/three.module.js';
 import {
   C, toon, glowMat, glassMat, add, box, slab, planeGeo, boxGeo, cyl, group,
   canvasTex, glowSprite, contactShadow, JP_FONT, Batch, sphereGeo,

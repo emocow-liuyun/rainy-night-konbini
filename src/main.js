@@ -1,7 +1,7 @@
 /* =========================================================
    main.js — 渲染器 / 三渲二后处理（描边+泛光）/ 湿地面平面反射 / 动效循环
    ========================================================= */
-import * as THREE from 'three';
+import * as THREE from '../vendor/three.module.js';
 import { OrbitControls } from '../vendor/OrbitControls.js';
 
 import { buildBase, buildStreets, buildPuddles, LAYOUT, PUDDLE_SPOTS } from './base.js';

@@ -4,7 +4,7 @@
    从 900+ 压到几十。仅处理静态对象：跳过动画部件、透明物体、
    多材质、InstancedMesh、Sprite、以及带自定义 shader 的对象。
    ========================================================= */
-import * as THREE from 'three';
+import * as THREE from '../vendor/three.module.js';
 import { mergeGeometries } from '../vendor/BufferGeometryUtils.js';
 
 /* 这些名字下的子树会被排除（有动画或需要独立存在） */

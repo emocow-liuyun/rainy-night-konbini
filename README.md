@@ -43,7 +43,7 @@ Opens `http://127.0.0.1:8080` automatically. Any static server works:
 python3 -m http.server 8080
 ```
 
-> Must be served over HTTP — the project uses an ES Module import map, so opening `index.html` directly from disk will be blocked by the browser's CORS policy.
+> Must be served over HTTP — ES Modules are blocked by the browser's CORS policy when opened straight from disk. All imports use explicit relative paths (no import map, no bundler), so any static server works.
 
 ### Controls
 

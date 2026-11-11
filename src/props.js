@@ -2,7 +2,7 @@
    props.js — 街角外部元素：自动贩卖机 / 自行车 / 路灯 / 电线杆
              路牌 / 护栏 / 公告栏 / 小巷 / 信号灯 / 管线
    ========================================================= */
-import * as THREE from 'three';
+import * as THREE from '../vendor/three.module.js';
 import {
   C, toon, glowMat, glassMat, add, box, slab, planeGeo, boxGeo, cyl, group,
   canvasTex, glowSprite, contactShadow, JP_FONT, tube, sphereGeo,

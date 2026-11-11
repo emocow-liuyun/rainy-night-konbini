@@ -1,7 +1,7 @@
 /* =========================================================
    core.js — 色板 / 卡通材质 / 几何工具 / Canvas 贴图
    ========================================================= */
-import * as THREE from 'three';
+import * as THREE from '../vendor/three.module.js';
 
 export const LAYER = { MAIN: 0, NO_REFLECT: 2 };
 
