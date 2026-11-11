@@ -4,14 +4,22 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <title>雨夜コンビニ — Rainy Night Konbini Diorama</title>
+<meta name="description" content="A rainy-night Japanese convenience store street corner, as a collectible miniature diorama — cel-shaded Three.js with planar wet-ground reflections.">
 <style>
   html, body { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#04060b; }
   body { cursor: grab; }
   body.dragging { cursor: grabbing; }
   canvas { display:block; width:100%; height:100%; outline:none; }
 </style>
-</head>
-<body>
+<!--
+  Module script lives in <head> deliberately.
+  A <script type="module"> at the end of <body> leaves the document stuck in
+  readyState "interactive" behind GitHub Pages' CDN in some browsers: the module
+  graph resolves, but the script never executes and no error is reported.
+  Placing it in <head> (modules are deferred by default) parses the DOM
+  independently and runs reliably.
+-->
 <script type="module" src="./src/main.js"></script>
-</body>
+</head>
+<body></body>
 </html>
