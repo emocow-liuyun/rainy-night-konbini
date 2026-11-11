@@ -10,16 +10,61 @@
   body { cursor: grab; }
   body.dragging { cursor: grabbing; }
   canvas { display:block; width:100%; height:100%; outline:none; }
+
+  /* 首帧之前的静默底色，避免白闪 */
+  #boot {
+    position: fixed; inset: 0; background: #04060b;
+    display: flex; align-items: center; justify-content: center;
+    transition: opacity .8s ease; pointer-events: none; z-index: 10;
+  }
+  #boot.gone { opacity: 0; }
+  #boot i {
+    width: 26px; height: 26px; border-radius: 50%;
+    border: 1px solid rgba(150,180,220,.22);
+    border-top-color: rgba(190,220,255,.75);
+    animation: spin 1.1s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
-<!--
-  Module script lives in <head> deliberately.
-  A <script type="module"> at the end of <body> leaves the document stuck in
-  readyState "interactive" behind GitHub Pages' CDN in some browsers: the module
-  graph resolves, but the script never executes and no error is reported.
-  Placing it in <head> (modules are deferred by default) parses the DOM
-  independently and runs reliably.
--->
-<script type="module" src="./src/main.js"></script>
 </head>
-<body></body>
+<body>
+<div id="boot"><i></i></div>
+
+<!--
+  用动态 import() 加载主模块，而不是 <script type="module" src>。
+
+  原因：<script type="module"> 的依赖图解析会阻塞文档解析。当模块图较深
+  （8 个 JS + 200KB 的 three.js）走 CDN 时，任何一个请求慢一拍，浏览器就
+  会卡在 readyState="interactive"，脚本永远不执行，而且不会抛任何错误
+  —— 页面上就是一片黑，控制台干净得像什么都没发生。
+
+  动态 import() 不阻塞解析，还能 try/catch，失败了可以重试。
+-->
+<script type="module">
+  const boot = document.getElementById('boot');
+  const show = (msg) => {
+    if (boot) boot.innerHTML = '<div style="color:#7b8ea8;font:12px/1.6 ui-monospace,monospace;text-align:center">' + msg + '</div>';
+  };
+
+  async function load(attempt = 1) {
+    try {
+      await import('./src/main.js');
+      if (boot) {
+        boot.classList.add('gone');
+        setTimeout(() => boot.remove(), 900);
+      }
+    } catch (e) {
+      console.error('[konbini] load failed', attempt, e);
+      if (attempt < 4) {
+        // 依赖图里可能有请求被 CDN 掐断，退避重试（加 query 绕过缓存）
+        show('正在重新加载…');
+        await new Promise(r => setTimeout(r, 600 * attempt));
+        return load(attempt + 1);
+      }
+      show('加载失败，请刷新页面');
+    }
+  }
+  load();
+</script>
+</body>
 </html>
