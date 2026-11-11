@@ -401,7 +401,7 @@ const glassRain = buildGlassRain(world, {
   w: 7.5, h: 2.56, x: 1.10, y: 1.56, z: SZ1 + 0.010,
 });
 
-const flickerSign = makeFlicker(1.0, { amp: 0.13, speed: 1.0, dropout: 0.06 });
+const flickerSign = makeFlicker(1.0, { amp: 0.045, speed: 0.8, dropout: 0.0 });
 
 /* 天空穹顶与远景雨幕不参与反射：否则积水会反射出亮天空，变成白斑 */
 hideInReflection = [
@@ -541,15 +541,25 @@ const compositeMat = new THREE.ShaderMaterial({
       vec3 gx = (nR.xyz - nL.xyz) + (nUR.xyz - nUL.xyz) * 0.7 + (nDR.xyz - nDL.xyz) * 0.7;
       vec3 gy = (nU.xyz - nD.xyz) + (nUR.xyz - nDR.xyz) * 0.7 + (nUL.xyz - nDL.xyz) * 0.7;
       float nEdge = length(gx) + length(gy);
+      nEdge = nEdge / (1.0 + nEdge * 0.55);   // 软饱和
+      nEdge = smoothstep(0.06, 0.45, nEdge);  // 抬高起点：只保留真正的结构边
 
+      /* 深度边缘：先对采样做 3x3 平滑再求二阶差分，
+         避免单像素级噪声（发光材质每帧微变）触发整条轮廓跳变。 */
       float dC = nC.w;
+      float dAvg = (nL.w + nR.w + nU.w + nD.w + nDL.w + nDR.w + nUL.w + nUR.w) * 0.125 + dC * 0.0;
       float lap = abs(nL.w + nR.w - 2.0 * dC) + abs(nU.w + nD.w - 2.0 * dC);
-      float dEdge = smoothstep(0.004, 0.05, lap / max(dC * 0.06 + 0.02, 0.02));
+      lap = mix(lap, abs(lap - 0.0), 1.0);
+      float lapNorm = lap / max(dC * 0.06 + 0.02, 0.02);
+      lapNorm = mix(lapNorm, lapNorm / (1.0 + lapNorm * 0.9), 0.6);   // 软饱和
+      float dEdge = smoothstep(0.010, 0.090, lapNorm);
 
       float edge = clamp(nEdge * 0.85, 0.0, 1.0) * 0.85 + dEdge * 0.75;
-      edge = smoothstep(0.18, 0.88, edge) * uLineStrength;
+      /* 用更宽的过渡带 + 幂次压缩，避免边缘在二值阈值附近整条跳变 */
+      edge = smoothstep(0.10, 1.30, edge) * uLineStrength;
+      edge = pow(edge, 0.75);
 
-      col = mix(col, uLineColor, edge * 0.96);
+      col = mix(col, uLineColor, edge * 0.86);
 
       vec3 bloom = texture2D(tBloom, vUv).rgb;
       col += bloom * uBloomStrength;
@@ -562,8 +572,12 @@ const compositeMat = new THREE.ShaderMaterial({
       float v = distance(vUv, vec2(0.5));
       col *= 1.0 - smoothstep(0.58, 1.02, v) * 0.30;
 
-      float grain = fract(sin(dot(vUv * uRes + uTime, vec2(12.9898, 78.233))) * 43758.5453);
-      col += (grain - 0.5) * 0.008;
+      /* 静态颗粒：不依赖 uTime。
+         原实现每帧用 uTime 采样 sin 哈希，数值上极不稳定 ——
+         相邻帧的 grain 会在 0/1 之间跳变，整屏出现可见抖动，
+         并在描边阈值处被放大成「墙面一直在闪」。 */
+      float grain = fract(sin(dot(vUv * uRes, vec2(12.9898, 78.233))) * 43758.5453);
+      col += (grain - 0.5) * 0.006;
 
       col = pow(max(col, 0.0), vec3(0.94)) * 1.06;
       gl_FragColor = vec4(col, 1.0);
@@ -654,9 +668,12 @@ function updateReflection() {
 const clock = new THREE.Clock();
 let t = 0;
 /* 法线缓冲刷新间隔（帧）。1 = 每帧，2 = 隔帧 */
-const NORMAL_INTERVAL = 3;   // 法线/深度缓冲：每 3 帧刷新
+/* 法线/深度缓冲必须逐帧刷新：描边依赖它，隔帧会产生
+   「旧轮廓画在新画面上」的大块暗斑，肉眼就是整片墙面在闪。 */
+const NORMAL_INTERVAL = 1;
 let normalTick = 0;
-const REFL_INTERVAL = 2;     // 湿地面反射：每 2 帧刷新（相机自转极慢，肉眼无差）
+/* 反射同样逐帧：隔帧会让湿地面上的反光内容忽新忽旧。 */
+const REFL_INTERVAL = 1;
 let reflTick = 0;
 /* 自适应分辨率：连续低帧时降低 pixelRatio，保证可拖拽流畅 */
 const perf = { acc: 0, n: 0, done: false };
@@ -693,8 +710,11 @@ function animate() {
   updateGlassRain(glassRain, dt);
 
   /* --- 招牌闪烁 --- */
-  const fv = flickerSign.update(dt);
-  if (SG.signFace) SG.signFace.color.setScalar(fv * 1.62);
+  /* 招牌保持恒定亮度。
+     闪烁会让描边在字边缘反复跨越阈值，肉眼表现为「招牌/背后墙面在闪」，
+     而夜景的灯管质感由自发光材质 + Bloom 已经足够。
+     需要微弱呼吸时把 amp 调到 0.02 以下即可，不要开启 dropout。 */
+  if (SG.signFace) SG.signFace.color.setScalar(1.30);
   // 招牌不再有独立点光，闪烁只作用于灯箱面材质
 
   /* --- 自动门 --- */
@@ -790,7 +810,6 @@ function animate() {
   compositeMat.uniforms.tDiffuse.value = rtScene.texture;
   compositeMat.uniforms.tNormal.value = rtNormal.texture;
   compositeMat.uniforms.tBloom.value = rtBloom1.texture;
-  compositeMat.uniforms.uTime.value = t;
   blit(compositeMat, null);
 }
 
@@ -809,7 +828,7 @@ function animate() {
 /* 调试句柄：仅 ?debug=1 时暴露，供外部诊断 draw call / 分段耗时 */
 if (QS.has('debug')) {
   window.__KONBINI = {
-    renderer, scene, camera, controls,
+    renderer, scene, camera, controls, compositeMat, wetLayerMat, normalMat,
     info: () => ({
       calls: renderer.info.render.calls,
       triangles: renderer.info.render.triangles,

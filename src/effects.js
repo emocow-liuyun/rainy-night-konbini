@@ -24,14 +24,15 @@ export function buildRain(scene, opts = {}) {
       uHeight: { value: height },
       uSpeed: { value: speed },
       uWind: { value: wind },
-      uColor: { value: new THREE.Color(0xbfd6ee) },
-      uOpacity: { value: 0.44 },
+      uColor: { value: new THREE.Color(0x7f9ec4) },
+      uOpacity: { value: 0.20 },
     },
     vertexShader: /* glsl */`
       uniform float uTime, uArea, uHeight, uSpeed, uWind;
       attribute vec3 aSeed;
       varying float vAlpha;
       varying float vY;
+      varying vec2 vUvR;
       void main() {
         float speed = uSpeed * (0.75 + aSeed.z * 0.75);
         float y = mod(aSeed.y * uHeight - uTime * speed, uHeight);
@@ -47,22 +48,41 @@ export function buildRain(scene, opts = {}) {
 
         mv.xy += sc;
         gl_Position = projectionMatrix * mv;
-        vAlpha = smoothstep(0.0, 2.0, y) * smoothstep(uHeight, uHeight - 2.5, y) * (0.35 + aSeed.x * 0.65);
+
+        float fadeUp = smoothstep(0.0, 2.0, y) * smoothstep(uHeight, uHeight - 2.5, y);
+        /* 近处雨丝压低透明度：镜头附近的大块雨线逐帧扫过，是剩余闪烁的主因 */
+        float dist = -mv.z;
+        float nearFade = smoothstep(0.0, 5.0, dist) * 0.75 + 0.25;
+        float farFade = 1.0 - smoothstep(26.0, 42.0, dist) * 0.7;
+        vAlpha = fadeUp * nearFade * farFade * (0.35 + aSeed.x * 0.65);
         vY = y;
+        vUvR = uv;
       }
     `,
     fragmentShader: /* glsl */`
       uniform vec3 uColor; uniform float uOpacity;
       varying float vAlpha;
+      varying vec2 vUvR;
       void main() {
-        float a = vAlpha * uOpacity;
-        // 两端淡出，中间实
+        /* 横向做一次柔化，纵向两端淡出。
+           雨丝是 1 像素宽的四边形，如果 alpha 全由顶点插值，
+           相邻帧的亚像素位移会让整条线在「有」和「无」之间跳，
+           这是剩余闪烁的主要来源。横向羽化后变成软边，过渡连续。 */
+        float across = 1.0 - abs(vUvR.x * 2.0 - 1.0);
+        across = smoothstep(0.0, 0.55, across);
+        float along = smoothstep(0.0, 0.22, vUvR.y) * smoothstep(1.0, 0.78, vUvR.y);
+        float a = vAlpha * uOpacity * across * along;
+        if (a < 0.004) discard;
         gl_FragColor = vec4(uColor, a);
       }
     `,
     transparent: true,
     depthWrite: false,
-    blending: THREE.NormalBlending,
+    depthTest: true,
+    /* 加法混合：与透明队列的排序无关。
+       原先用 NormalBlending，5200 根雨丝距离几乎相同，逐帧排序结果抖动，
+       导致它们之间的遮挡顺序变化 —— 表现为画面整块闪烁。 */
+    blending: THREE.AdditiveBlending,
   });
 
   const inst = new THREE.InstancedBufferGeometry();
@@ -82,6 +102,7 @@ export function buildRain(scene, opts = {}) {
   const mesh = new THREE.Mesh(inst, mat);
   mesh.frustumCulled = false;
   mesh.renderOrder = 20;
+  mesh.matrixAutoUpdate = false;
   scene.add(mesh);
 
   return { mesh, mat };
