@@ -17,7 +17,12 @@ import {
 } from './effects.js';
 import { buildSky, buildCityGlow, buildHorizonHaze } from './atmos.js';
 import { batchStatic } from './batch.js';
-import { makeWalker, makeVehicle } from './life.js';
+import {
+  Pedestrian, scriptCommuter, scriptBrowser, scriptCrosser,
+  scriptSideStreet, scriptVending, scriptPasserby, scriptLoaiter,
+  makeVehicle,
+} from './life.js';
+import { buildFigure } from './figure.js';
 import { toon, glowMat, box, canvasTex, JP_FONT, TEX_STATE } from './core.js';
 
 const QS = new URLSearchParams(location.search);
@@ -439,63 +444,62 @@ world.add(lifeRoot);
 const walkers = [];
 const vehicles = [];
 
-/* --- 行人路径（世界坐标 [x,z]）--- */
-const WALK_Y = 0.16;          // 人行道面高
+/* --- 行人：7 位，各有独立行为剧本 --- */
+const WALK_Y = 0.16;
 const ROAD_Y = 0.03;
 
-/* A. 店前人行道上往返的行人（沿前街北侧，z≈2.6） */
-walkers.push(makeWalker(lifeRoot, [
-  [-4.2, 2.62], [2.2, 2.62], [6.8, 2.66], [9.2, 2.62],
-  [6.8, 2.50], [2.2, 2.50], [-4.2, 2.50], [-4.2, 2.62],
-], {
-  speed: 1.02, y: WALK_Y, pauseAt: 0.06,
-  personOpts: { coat: 0x2f3a4d, pants: 0x1f242c, umbrella: 0x2c4a6e, bag: true },
-}));
+/* 外观配置：夜间的通勤色，皮肤/发色随机化 */
+const PED_LOOKS = {
+  commuterA: {
+    coat: 0x2f3a4d, pants: 0x1f242c, skin: 0xdcb295, hair: 0x1a1715,
+    umbrella: 0x2c4a6e, bag: true,
+  },
+  browserA: {
+    coat: 0x4a3a2e, pants: 0x232830, skin: 0xe8c4a8, hair: 0x2b2118,
+    umbrella: null, bag: true, scarf: 0x6b3a3a,
+  },
+  crosserA: {
+    coat: 0x33384a, pants: 0x2a2f38, skin: 0xf0cfb4, hair: 0x14110f,
+    umbrella: 0x6e3a44, hat: false,
+  },
+  sideA: {
+    coat: 0x2a3b36, pants: 0x1f242c, skin: 0xc99a7a, hair: 0x3d2b1c,
+    umbrella: 0x384a3a, hat: true, bag: true,
+  },
+  vendingA: {
+    coat: 0x5a4636, pants: 0x232830, skin: 0xdcb295, hair: 0x1a1715,
+    umbrella: null, bag: false,
+  },
+  passerA: {
+    coat: 0x3d3346, pants: 0x2a2f38, skin: 0xe8c4a8, hair: 0x2b2118,
+    umbrella: 0x4a3a6b,
+  },
+  loiterA: {
+    coat: 0x2b3340, pants: 0x1f242c, skin: 0xf0cfb4, hair: 0x14110f,
+    umbrella: null, bag: true, scarf: 0x3a4a3a,
+  },
+};
 
-/* B. 打伞的上班族，从侧街走到店门口再折返 */
-walkers.push(makeWalker(lifeRoot, [
-  [-3.6, -8.6], [-3.6, -1.0], [-3.55, 1.6], [-2.2, 2.55],
-  [1.0, 2.55], [0.4, 2.66], [-2.2, 2.50], [-3.55, 1.4],
-  [-3.6, -1.4], [-3.6, -8.6],
-], {
-  speed: 0.92, y: WALK_Y, pauseAt: 0.10,
-  personOpts: { coat: 0x3d3346, pants: 0x2a2f38, umbrella: 0x6e3a44, hat: true },
-}));
-
-/* C. 对面人行道上的行人（z≈8.8） */
-walkers.push(makeWalker(lifeRoot, [
-  [9.0, 8.78], [-2.0, 8.74], [-8.4, 8.78],
-  [-2.0, 8.92], [9.0, 8.94],
-], {
-  speed: 1.12, y: WALK_Y, pauseAt: 0.04,
-  personOpts: { coat: 0x2a3b36, pants: 0x1f242c, umbrella: null, bag: true },
-}));
-
-/* D. 站在店门口不动的顾客（看橱窗） */
-{
-  const w = makeWalker(lifeRoot, [[3.15, 2.45], [3.16, 2.46]], {
-    speed: 0, y: WALK_Y,
-    personOpts: { coat: 0x4a3a2e, pants: 0x232830, umbrella: 0x384a3a, bag: true },
+function spawnPed(name, lookKey, scriptFn, startX, startZ, facing, speed) {
+  const fig = buildFigure(PED_LOOKS[lookKey]);
+  const p = new Pedestrian(lifeRoot, {
+    name,
+    figure: fig,
+    startX, startZ, facing,
+    speed,
+    script: scriptFn(),
   });
-  w.paused = true;
-  w.pauseTimer = 1e9;   // 常驻
-  w.person.root.rotation.y = Math.PI * 0.95;
-  w.person.root.position.set(3.15, WALK_Y, 2.45);
-  walkers.push(w);
+  walkers.push(p);
+  return p;
 }
 
-/* E. 在自动贩卖机前的人 */
-{
-  const w = makeWalker(lifeRoot, [[6.0, 2.15], [6.01, 2.16]], {
-    speed: 0, y: WALK_Y,
-    personOpts: { coat: 0x33384a, pants: 0x2a2f38, umbrella: null, hat: true },
-  });
-  w.paused = true;
-  w.pauseTimer = 1e9;
-  w.person.root.rotation.y = -Math.PI * 0.5;
-  w.person.root.position.set(6.0, WALK_Y, 2.15);
-  walkers.push(w);
-}
+spawnPed('commuterA', 'commuterA', scriptCommuter, 9.0, 2.62, -Math.PI / 2, 1.12);
+spawnPed('browserA', 'browserA', scriptBrowser, -8.6, 2.58, Math.PI / 2, 1.02);
+spawnPed('crosserA', 'crosserA', scriptCrosser, -1.4, -1.0, 0, 1.18);
+spawnPed('sideA', 'sideA', scriptSideStreet, -3.55, -8.0, 0, 1.06);
+spawnPed('vendingA', 'vendingA', scriptVending, 9.0, 2.58, -Math.PI / 2, 1.10);
+spawnPed('passerA', 'passerA', scriptPasserby, -8.8, 8.82, Math.PI / 2, 1.05);
+spawnPed('loiterA', 'loiterA', scriptLoaiter, 3.4, 2.55, 0.4, 1.08);
 
 /* --- 车辆：前街两个方向 + 侧街 --- */
 const LANE_Z = (LAYOUT.roadZ[0] + LAYOUT.roadZ[1]) / 2;
@@ -875,7 +879,7 @@ function animate() {
 
 
   /* --- 行人与车辆 --- */
-  for (let i = 0; i < walkers.length; i++) walkers[i].update(dt);
+  for (let i = 0; i < walkers.length; i++) walkers[i].update(dt, t);
   for (let i = 0; i < vehicles.length; i++) vehicles[i].update(dt);
 
   wetLayerMat.uniforms.uTime.value = t;

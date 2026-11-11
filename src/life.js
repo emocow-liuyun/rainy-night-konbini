@@ -1,6 +1,6 @@
 /* =========================================================
-   life.js — 常驻行人 + 街角过路车辆
-   · 行人：分段人形（腿/躯干/头/手持伞），沿路径行走、自动朝向
+   life.js — 行人行为系统 + 街角过路车辆
+   · 行人：高精度人形（见 figure.js）+ 状态机行为（进店/看橱窗/等灯/过马路/离场）
    · 车辆：车身 + 车窗 + 前后灯 + 轮胎，沿车道循环行驶
    ========================================================= */
 import * as THREE from '../vendor/three.module.js';
@@ -12,16 +12,379 @@ import { LAYOUT } from './base.js';
 import { mergeGeometries } from '../vendor/BufferGeometryUtils.js';
 
 /* =========================================================
-   合批工具：把 group 里所有叶子 Mesh 按材质合并
-   用于行人/车辆这类「小部件很多」的对象，减少 draw call
+   行人行为系统
+   不再是简单折线往返，而是一套带状态机的生活行为：
+     ENTER_STORE  → 走向店门 → 进店消失 → 店内停留 → 出店
+     BROWSE       → 停在橱窗前看
+     VENDING      → 去贩卖机买东西
+     WALK         → 沿人行道走一段（单向，不折返）
+     WAIT_CROSS   → 停在路口等灯
+     CROSS        → 过斑马线
+     GONE         → 从画面边缘离开，延迟后从另一侧重新进入
    ========================================================= */
-function mergeGroupByMaterial(group) {
-  const byMat = new Map();
-  const leaves = [];
-  group.traverse(o => { if (o.isMesh && !o.isInstancedMesh) leaves.push(o); });
+import { buildFigure, poseWalk, poseStand, RATIO } from './figure.js';
 
-  for (const m of leaves) {
-    if (!m.geometry.attributes.position) continue;
+/* --- 世界坐标锚点（与 base.js 的布局一致）--- */
+const WALK_Y = 0.16;                    // 人行道面高
+/* 自动门在世界坐标里的位置：
+   store 局部 x=4.35，storeGroup 偏移 -2.2 → 世界 x=2.15
+   玻璃面 z=2.0，门洞宽 2.48（x 0.91 ~ 3.39） */
+const DOOR_X = 2.15;
+const DOOR_Z = 2.00;
+const DOOR_HALF_W = 1.16;               // 门洞半宽（略小于 1.24，留边）
+const DOOR_IN_Z = 0.95;                 // 门内侧进深
+const AISLE_Z = 0.30;                   // 店内导视地面
+const STORE_IN_Y = 0.16;
+
+const VP_LANE = [-9.2, 8.9];            // 前街可行走范围
+const SIDE_LANE = [-8.6, 1.8];
+
+/* 一行人的行为脚本：who / 起点 / 状态序列 */
+export class Pedestrian {
+  constructor(parent, opts) {
+    const {
+      name = 'ped',
+      startX = 0,
+      startZ = 2.55,
+      facing = 0,                 // 初始朝向（弧度，0 = +Z）
+      figure,                     // buildFigure 的返回值
+      speed = 1.15,               // m/s，微缩尺度下约 1.1
+      script = [],                // [{state, ...params}]
+    } = opts;
+
+    this.name = name;
+    this.fig = figure;
+    this.parent = parent;
+    this.root = figure.root;
+    this.speed = speed;
+    this.script = script;
+    this.step = 0;
+    this.state = null;
+    this.stateT = 0;
+    this.stateData = {};
+    this.pos = new THREE.Vector2(startX, startZ);
+    this.heading = facing;
+    this.targetHeading = facing;
+    this.walkPhase = Math.random() * Math.PI * 2;
+    this.idleT = Math.random() * 3;
+    this.visible = true;
+
+    this.root.position.set(startX, WALK_Y, startZ);
+    this.root.rotation.y = facing;
+    parent.add(this.root);
+
+    // 标记持伞的手臂（poseWalk/poseStand 会跳过）
+    if (figure.joints.shoulderR.rotation.x < -0.5) figure.joints.__holdR = true;
+
+    this._enterState(script[0]);
+  }
+
+  _enterState(st) {
+    if (!st) { this.state = 'GONE'; this.stateT = 0; return; }
+    this.state = st.state;
+    this.stateT = 0;
+    this.stateData = { ...st };
+    // 设定目标点
+    if (st.x !== undefined && st.z !== undefined) {
+      this.stateData.tx = st.x;
+      this.stateData.tz = st.z;
+    }
+  }
+
+  _next() {
+    this.step++;
+    if (this.step < this.script.length) {
+      this._enterState(this.script[this.step]);
+    } else {
+      // 脚本走完：循环回第一项
+      this.step = 0;
+      this._enterState(this.script[0]);
+    }
+  }
+
+  /* 朝目标点走，返回是否到达 */
+  _moveTo(tx, tz, dt, opts = {}) {
+    const { arriveDist = 0.16, speedScale = 1, walk = true } = opts;
+    const dx = tx - this.pos.x;
+    const dz = tz - this.pos.y;
+    const dist = Math.hypot(dx, dz);
+    if (dist < arriveDist) return true;
+
+    const spd = this.speed * speedScale;
+    const step = Math.min(dist, spd * dt);
+    this.pos.x += (dx / dist) * step;
+    this.pos.y += (dz / dist) * step;
+
+    this.targetHeading = Math.atan2(dx, dz);
+    if (walk) this.walkPhase += dt * spd * 5.2 * this.fig.strideScale;
+    return false;
+  }
+
+  _face(tx, tz, dt, rate = 4.0) {
+    const dx = tx - this.pos.x;
+    const dz = tz - this.pos.y;
+    this.targetHeading = Math.atan2(dx, dz);
+    let d = this.targetHeading - this.heading;
+    while (d > Math.PI) d -= Math.PI * 2;
+    while (d < -Math.PI) d += Math.PI * 2;
+    this.heading += d * Math.min(1, dt * rate);
+  }
+
+  update(dt, t) {
+    if (this.state === 'GONE') {
+      this.stateT += dt;
+      this.root.visible = false;
+      if (this.stateT > (this.stateData.wait || 3)) this._next();
+      return;
+    }
+    this.root.visible = this.visible;
+    this.stateT += dt;
+
+    const st = this.stateData;
+
+    switch (this.state) {
+      /* ---- 单向行走 ---- */
+      case 'WALK': {
+        const arrived = this._moveTo(st.tx, st.tz, dt, { speedScale: st.speedScale || 1 });
+        // 转向
+        let d = this.targetHeading - this.heading;
+        while (d > Math.PI) d -= Math.PI * 2;
+        while (d < -Math.PI) d += Math.PI * 2;
+        this.heading += d * Math.min(1, dt * 5.5);
+        poseWalk(this.fig, this.walkPhase);
+        if (arrived) this._next();
+        break;
+      }
+
+      /* ---- 走向店门：分两段，先到门洞正前方，再沿门洞进入 ---- */
+      case 'ENTER': {
+        // 第一段：走到门洞中心正前方（保持与人行道同高）
+        if (this.pos.y > DOOR_Z + 0.30) {
+          const arrived = this._moveTo(DOOR_X, DOOR_Z + 0.42, dt, { arriveDist: 0.10 });
+          let d = this.targetHeading - this.heading;
+          while (d > Math.PI) d -= Math.PI * 2;
+          while (d < -Math.PI) d += Math.PI * 2;
+          this.heading += d * Math.min(1, dt * 5.5);
+          poseWalk(this.fig, this.walkPhase);
+          if (arrived) this.stateT = 0;
+        } else {
+          // 第二段：沿 +z 反方向穿门洞进店（x 锁死在门洞内）
+          this.pos.x += (DOOR_X - this.pos.x) * Math.min(1, dt * 3.0);
+          const stepZ = this.speed * dt;
+          this.pos.y -= stepZ;
+          this.targetHeading = Math.PI;      // 面向店内（-z）
+          let d = this.targetHeading - this.heading;
+          while (d > Math.PI) d -= Math.PI * 2;
+          while (d < -Math.PI) d += Math.PI * 2;
+          this.heading += d * Math.min(1, dt * 4.5);
+          this.walkPhase += dt * this.speed * 5.2 * this.fig.strideScale;
+          poseWalk(this.fig, this.walkPhase);
+          if (this.pos.y <= DOOR_IN_Z) {
+            this._enterState({ state: 'INSIDE', duration: st.duration || 6 });
+          }
+        }
+        break;
+      }
+
+      /* ---- 店内：真的站在店里（可见，透过玻璃能看到）---- */
+      case 'INSIDE': {
+        // 在店内缓慢走动挑选商品
+        this.root.visible = true;
+        const wander = Math.sin(this.stateT * 0.55 + this.idleT) * 1.1;
+        this.pos.x = DOOR_X + wander;
+        this.pos.y = DOOR_IN_Z - 0.35;
+        this.targetHeading = Math.PI + Math.sin(this.stateT * 0.4) * 0.9;
+        let d = this.targetHeading - this.heading;
+        while (d > Math.PI) d -= Math.PI * 2;
+        while (d < -Math.PI) d += Math.PI * 2;
+        this.heading += d * Math.min(1, dt * 1.8);
+        poseStand(this.fig, t + this.idleT, { lookAround: true });
+        if (this.stateT >= (st.duration || 6)) {
+          this._enterState({ state: 'EXIT' });
+        }
+        break;
+      }
+
+      /* ---- 从店里走出来：沿门洞退出到人行道 ---- */
+      case 'EXIT': {
+        this.root.visible = true;
+        this.pos.x += (DOOR_X - this.pos.x) * Math.min(1, dt * 3.0);
+        const stepZ = this.speed * dt * 0.95;
+        this.pos.y += stepZ;
+        this.targetHeading = 0;               // 面向街外（+z）
+        let d = this.targetHeading - this.heading;
+        while (d > Math.PI) d -= Math.PI * 2;
+        while (d < -Math.PI) d += Math.PI * 2;
+        this.heading += d * Math.min(1, dt * 4.5);
+        this.walkPhase += dt * this.speed * 5.2 * this.fig.strideScale;
+        poseWalk(this.fig, this.walkPhase);
+        if (this.pos.y >= DOOR_Z + 0.45) this._next();
+        break;
+      }
+
+      /* ---- 站着做某事 ---- */
+      case 'STAND': {
+        this._face(st.faceX ?? st.tx ?? this.pos.x, st.faceZ ?? st.tz ?? this.pos.y, dt, 2.5);
+        poseStand(this.fig, t + this.idleT, { lookAround: st.lookAround ?? true, phone: st.phone });
+        if (this.stateT >= (st.duration || 5)) this._next();
+        break;
+      }
+
+      /* ---- 橱窗前看 ---- */
+      case 'BROWSE': {
+        this._face(st.faceX, st.faceZ, dt, 3.0);
+        poseStand(this.fig, t + this.idleT, { lookAround: false });
+        // 头部左右扫视商品
+        this.fig.joints.head.rotation.y = Math.sin(t * 0.55 + this.idleT) * 0.55;
+        if (this.stateT >= (st.duration || 6)) this._next();
+        break;
+      }
+
+      /* ---- 等灯 ---- */
+      case 'WAIT': {
+        this._face(st.tx ?? this.pos.x, st.tz ?? this.pos.y + 1, dt, 2.0);
+        poseStand(this.fig, t + this.idleT, { lookAround: true });
+        if (this.stateT >= (st.duration || 6)) this._next();
+        break;
+      }
+
+      /* ---- 过马路 ---- */
+      case 'CROSS': {
+        const arrived = this._moveTo(st.tx, st.tz, dt, { speedScale: st.speedScale || 1.3 });
+        let d = this.targetHeading - this.heading;
+        while (d > Math.PI) d -= Math.PI * 2;
+        while (d < -Math.PI) d += Math.PI * 2;
+        this.heading += d * Math.min(1, dt * 5.0);
+        poseWalk(this.fig, this.walkPhase);
+        if (arrived) this._next();
+        break;
+      }
+
+      /* ---- 消失（出画面）---- */
+      case 'DESPAWN': {
+        this.stateT += dt;
+        if (this.stateT > 0.4) { this.root.visible = false; }
+        if (this.stateT >= (st.delay || 6)) this._next();
+        break;
+      }
+
+      default:
+        poseStand(this.fig, t, {});
+        break;
+    }
+
+    // 应用位置与朝向
+    const inStore = (this.state === 'INSIDE');
+    this.root.position.set(this.pos.x, inStore ? STORE_IN_Y : WALK_Y, this.pos.y);
+    this.root.rotation.y = this.heading;
+  }
+}
+
+/* =========================================================
+   行人剧本
+   ========================================================= */
+
+/* 1. 通勤者：从东侧走来 → 走到店门口 → 进店买东西 → 出来 → 继续往西走掉 */
+export function scriptCommuter() {
+  return [
+    { state: 'WALK', x: -3.4, z: 2.62, speedScale: 1.0 },
+    { state: 'ENTER', duration: 7 + Math.random() * 4 },
+    { state: 'EXIT' },
+    { state: 'WALK', x: 9.4, z: 2.55, speedScale: 0.95 },
+    { state: 'DESPAWN', delay: 4 + Math.random() * 4 },
+    { state: 'WALK', x: -3.6, z: 2.62, speedScale: 1.0 },
+  ];
+}
+
+/* 2. 橱窗客：走到橱窗前看一会儿 → 再走开 */
+export function scriptBrowser() {
+  return [
+    { state: 'WALK', x: -0.2, z: 2.58 },
+    { state: 'BROWSE', faceX: -0.2, faceZ: 0.6, duration: 7 + Math.random() * 5 },
+    { state: 'WALK', x: -9.0, z: 2.60 },
+    { state: 'DESPAWN', delay: 4 + Math.random() * 4 },
+    { state: 'WALK', x: 9.2, z: 2.56 },
+    { state: 'BROWSE', faceX: 5.6, faceZ: 1.0, duration: 5 },
+    { state: 'WALK', x: 9.4, z: 2.60 },
+  ];
+}
+
+/* 3. 夜归人：横穿马路 → 走到店前 → 站一会 → 走掉 */
+export function scriptCrosser() {
+  return [
+    { state: 'CROSS', x: -1.4, z: 8.78, speedScale: 1.4 },
+    { state: 'CROSS', x: -1.4, z: 2.62, speedScale: 1.5 },
+    { state: 'WALK', x: 3.2, z: 2.58 },
+    { state: 'STAND', faceX: 2.0, faceZ: 0.4, duration: 6, phone: true },
+    { state: 'WALK', x: -9.2, z: 2.60 },
+    { state: 'DESPAWN', delay: 6 },
+  ];
+}
+
+/* 4. 侧街通勤：从巷口走上人行道，转向店方向 */
+export function scriptSideStreet() {
+  return [
+    { state: 'WALK', x: -3.55, z: -7.6 },
+    { state: 'WALK', x: -3.55, z: 1.9 },
+    { state: 'ENTER', duration: 14 },
+    { state: 'EXIT' },
+    { state: 'WALK', x: -3.6, z: 2.60 },
+    { state: 'WALK', x: -8.9, z: 2.60 },
+    { state: 'DESPAWN', delay: 8 },
+    { state: 'WALK', x: -3.55, z: -7.6 },
+  ];
+}
+
+/* 5. 贩卖机顾客：走到贩卖机前 → 站着按键 → 走开 */
+export function scriptVending() {
+  return [
+    { state: 'WALK', x: 6.70, z: 3.02 },          // 走到贩卖机正前方
+    { state: 'STAND', faceX: 6.70, faceZ: 2.55, duration: 6 + Math.random() * 4, lookAround: false },
+    { state: 'WALK', x: 3.0, z: 2.56 },
+    { state: 'WALK', x: -9.2, z: 2.60 },
+    { state: 'DESPAWN', delay: 5 },
+    { state: 'WALK', x: 9.2, z: 2.56 },
+  ];
+}
+
+/* 6. 对面走的路人（不互动，纯背景流动） */
+export function scriptPasserby() {
+  return [
+    { state: 'WALK', x: -9.0, z: 8.82 },
+    { state: 'DESPAWN', delay: 3 },
+    { state: 'WALK', x: 9.2, z: 8.86 },
+    { state: 'DESPAWN', delay: 6 },
+  ];
+}
+
+/* 7. 等人的人：站在路灯下不走 */
+export function scriptLoaiter() {
+  return [
+    { state: 'STAND', faceX: 2.0, faceZ: 2.4, duration: 14, phone: true },
+    { state: 'WALK', x: 9.3, z: 2.58 },
+    { state: 'DESPAWN', delay: 6 },
+    { state: 'WALK', x: -1.0, z: 2.60 },
+    { state: 'BROWSE', faceX: -1.0, faceZ: 0.5, duration: 9 },
+    { state: 'WALK', x: -9.0, z: 2.62 },
+    { state: 'DESPAWN', delay: 5 },
+    { state: 'WALK', x: 9.2, z: 2.58 },
+  ];
+}
+
+
+
+/* =========================================================
+   车辆合批：只合并「直接子 Mesh」，不递归进 Group。
+   之前用 traverse 会把子 Group 的 mesh 也吃掉，
+   导致关节位置被烘到父级原点（行人头跑到胯部就是这个 bug）。
+   ========================================================= */
+function mergeDirectChildren(group) {
+  const byMat = new Map();
+  const direct = group.children.filter(o => o.isMesh && !o.isInstancedMesh);
+  if (direct.length < 2) return 0;
+
+  for (const m of direct) {
+    if (!m.geometry?.attributes?.position) continue;
     const mat = m.material;
     if (!byMat.has(mat)) byMat.set(mat, []);
     byMat.get(mat).push(m);
@@ -33,7 +396,6 @@ function mergeGroupByMaterial(group) {
     const geos = [];
     for (const m of meshes) {
       let g = m.geometry.clone();
-      // 统一属性集
       for (const k of Object.keys(g.attributes)) {
         if (!['position', 'normal', 'uv'].includes(k)) g.deleteAttribute(k);
       }
@@ -43,338 +405,23 @@ function mergeGroupByMaterial(group) {
       }
       if (!g.attributes.normal) g.computeVertexNormals();
       if (g.index) g = g.toNonIndexed();
-      // 烘入相对 group 的变换
-      m.updateMatrixWorld(true);
-      const local = new THREE.Matrix4().copy(m.matrixWorld);
-      const inv = new THREE.Matrix4().copy(group.matrixWorld).invert();
-      local.premultiply(inv);
-      g.applyMatrix4(local);
+      m.updateMatrix();
+      g.applyMatrix4(m.matrix);   // 只烘自身局部矩阵，父级保持原点
       geos.push(g);
     }
     if (geos.length < 2) { geos.forEach(g => g.dispose()); continue; }
     let mg = null;
-    try { mg = mergeGeometries(geos, false); } catch (e) { mg = null; }
+    try { mg = mergeGeometries(geos, false); } catch { mg = null; }
     geos.forEach(g => g.dispose());
     if (!mg) continue;
 
     const nm = new THREE.Mesh(mg, mat);
     nm.frustumCulled = false;
     group.add(nm);
-    for (const m of meshes) if (m.parent) m.parent.remove(m);
+    for (const m of meshes) group.remove(m);
     merged += meshes.length;
   }
   return merged;
-}
-
-/* =========================================================
-   行人
-   ========================================================= */
-
-/* 行人配色（夜晚的通勤色） */
-const COAT_COLORS = [
-  0x2f3a4d, 0x3d3346, 0x2a3b36, 0x4a3a2e, 0x33384a,
-  0x5a4636, 0x2b3340, 0x463a4a,
-];
-const SKIN = 0xd8b89a;
-const HAIR = 0x1e1b1a;
-const PANTS = [0x1f242c, 0x2a2f38, 0x35302a, 0x232830];
-
-/**
- * 构建一个分段人形。
- * 返回 { root, parts, height }，parts 里是可独立摆动的关节组。
- */
-export function buildPerson(opts = {}) {
-  const {
-    coat = 0x2f3a4d,
-    pants = 0x1f242c,
-    umbrella = null,       // 颜色，null = 不打伞
-    bag = false,
-    scale = 1.0,
-    hat = false,
-  } = opts;
-
-  const root = new THREE.Group();
-  root.name = 'person';
-
-  const coatMat = toon(coat, { steps: [0.42, 0.66, 0.86, 1.0] });
-  const pantsMat = toon(pants, { steps: [0.38, 0.62, 0.84, 1.0] });
-  const skinMat = toon(SKIN, { steps: [0.46, 0.70, 0.88, 1.0] });
-  const hairMat = toon(HAIR, { steps: [0.4, 0.68, 0.9, 1.0] });
-  const shoeMat = toon(0x15181d, { steps: [0.35, 0.62, 0.86, 1.0] });
-
-  const H = 1.62 * scale;             // 总身高
-  const legLen = H * 0.44;
-  const torsoLen = H * 0.31;
-  const headR = H * 0.068;
-
-  /* --- 髋部：腿从这里摆动 --- */
-  const hip = new THREE.Group();
-  hip.position.y = legLen;
-  root.add(hip);
-
-  /* 双腿（各自的枢轴在髋部） */
-  const legL = new THREE.Group();
-  const legR = new THREE.Group();
-  hip.add(legL, legR);
-
-  for (const [grp, side] of [[legL, -1], [legR, 1]]) {
-    // 大腿+小腿做成一根（低面数风格，靠摆动足够）
-    const leg = new THREE.Mesh(boxGeo(H * 0.062, legLen * 0.96, H * 0.05), pantsMat);
-    leg.position.y = -legLen * 0.48;
-    leg.position.x = side * H * 0.045;
-    grp.add(leg);
-    // 鞋
-    const shoe = new THREE.Mesh(boxGeo(H * 0.075, H * 0.035, H * 0.105), shoeMat);
-    shoe.position.set(side * H * 0.045, -legLen * 0.97, H * 0.018);
-    grp.add(shoe);
-  }
-
-  /* --- 躯干 --- */
-  const torso = new THREE.Group();
-  torso.position.y = legLen;
-  root.add(torso);
-
-  const body = new THREE.Mesh(boxGeo(H * 0.15, torsoLen, H * 0.095), coatMat);
-  body.position.y = torsoLen * 0.5;
-  torso.add(body);
-
-  // 肩（稍微加宽，剪影更清楚）
-  const shoulders = new THREE.Mesh(boxGeo(H * 0.185, H * 0.045, H * 0.10), coatMat);
-  shoulders.position.y = torsoLen * 0.94;
-  torso.add(shoulders);
-
-  /* --- 手臂（枢轴在肩部） --- */
-  const armL = new THREE.Group();
-  const armR = new THREE.Group();
-  torso.add(armL, armR);
-  for (const [grp, side] of [[armL, -1], [armR, 1]]) {
-    grp.position.set(side * H * 0.088, torsoLen * 0.90, 0);
-    const arm = new THREE.Mesh(boxGeo(H * 0.042, torsoLen * 0.72, H * 0.042), coatMat);
-    arm.position.y = -torsoLen * 0.34;
-    grp.add(arm);
-    // 手
-    const hand = new THREE.Mesh(boxGeo(H * 0.038, H * 0.04, H * 0.038), skinMat);
-    hand.position.y = -torsoLen * 0.70;
-    grp.add(hand);
-  }
-
-  /* --- 脖子 + 头 --- */
-  const head = new THREE.Group();
-  torso.add(head);
-  head.position.y = torsoLen + headR * 0.94;
-
-  const skull = new THREE.Mesh(sphereGeo(headR, 10), skinMat);
-  skull.scale.set(1, 1.12, 0.95);
-  head.add(skull);
-
-  // 头发：只覆盖后上方（用半球，正面露出脸）
-  const hairGeo = new THREE.SphereGeometry(headR * 1.04, 10, 6, 0, Math.PI * 2, 0, Math.PI * 0.58);
-  const hairMesh = new THREE.Mesh(hairGeo, hairMat);
-  hairMesh.scale.set(1, 1.06, 1);
-  hairMesh.position.y = headR * 0.10;
-  hairMesh.rotation.x = -0.18;
-  head.add(hairMesh);
-
-  if (hat) {
-    const brim = new THREE.Mesh(cylGeo(headR * 1.35, headR * 1.3, headR * 0.10, 10), toon(0x22262e, { steps: [0.4, 0.7, 1] }));
-    brim.position.y = headR * 1.02;
-    head.add(brim);
-    const crown = new THREE.Mesh(cylGeo(headR * 0.85, headR * 0.95, headR * 0.55, 10), toon(0x22262e, { steps: [0.4, 0.7, 1] }));
-    crown.position.y = headR * 1.30;
-    head.add(crown);
-  }
-
-  /* --- 包（单肩或手提） --- */
-  if (bag) {
-    const bagMat = toon(0x2e2a26, { steps: [0.4, 0.68, 0.9, 1] });
-    const b = new THREE.Mesh(boxGeo(H * 0.09, H * 0.10, H * 0.05), bagMat);
-    b.position.set(H * 0.11, torsoLen * 0.28, H * 0.02);
-    torso.add(b);
-    // 包带
-    const strap = new THREE.Mesh(boxGeo(H * 0.012, torsoLen * 0.55, H * 0.012), bagMat);
-    strap.position.set(H * 0.055, torsoLen * 0.62, H * 0.04);
-    strap.rotation.z = -0.42;
-    torso.add(strap);
-  }
-
-  /* --- 伞 --- */
-  let umbrellaGroup = null;
-  if (umbrella !== null) {
-    umbrellaGroup = new THREE.Group();
-    const uMat = toon(umbrella, { steps: [0.44, 0.70, 0.90, 1.0] });
-    /* 伞面：用球缺（半球压扁）做弧面，比圆锥更像真伞。
-       半径 0.30H，纵向压到 0.45，边缘微微下垂。 */
-    const R = H * 0.30;
-    const canopyGeo = new THREE.SphereGeometry(R, 14, 6, 0, Math.PI * 2, 0, Math.PI * 0.42);
-    const canopy = new THREE.Mesh(canopyGeo, uMat);
-    canopy.scale.set(1, 0.62, 1);
-    canopy.position.y = H * 0.555;
-    umbrellaGroup.add(canopy);
-    // 伞尖
-    const tip = new THREE.Mesh(cylGeo(0.008, 0.014, H * 0.035, 6),
-      toon(0x2a2f38, { steps: [0.4, 0.7, 1] }));
-    tip.position.y = H * 0.60;
-    umbrellaGroup.add(tip);
-    // 伞缘垂边（一圈细边，强调剪影）
-    const rim = new THREE.Mesh(new THREE.TorusGeometry(R * 0.985, H * 0.006, 4, 18), uMat);
-    rim.rotation.x = Math.PI / 2;
-    rim.position.y = H * 0.555 - R * 0.62 * Math.cos(Math.PI * 0.42) * 0.0 + 0.0;
-    rim.position.y = H * 0.555 - R * 0.62 * 0.40;
-    umbrellaGroup.add(rim);
-    // 伞柄（斜握在右手）
-    const shaft = new THREE.Mesh(cylGeo(0.009, 0.009, H * 0.56, 6),
-      toon(0x8a8f98, { steps: [0.45, 0.72, 1] }));
-    shaft.position.set(H * 0.07, H * 0.20, H * 0.02);
-    shaft.rotation.z = -0.06;
-    umbrellaGroup.add(shaft);
-    // 伞面轻微前倾（挡雨）
-    umbrellaGroup.rotation.x = 0.06;
-    torso.add(umbrellaGroup);
-    // 举伞的手抬高
-    armR.rotation.x = -0.55;
-  }
-
-  /* 合批：躯干/头/肩这些不动的部件按材质合并，减少 draw call。
-     腿和手臂各自是独立 group（要摆动），保持原样。 */
-  mergeGroupByMaterial(torso);
-  mergeGroupByMaterial(head);
-  // 伞面单独，不动
-  if (umbrellaGroup) mergeGroupByMaterial(umbrellaGroup);
-
-  contactShadow(root, H * 0.55, H * 0.45, 0.42, 0, 0.004, 0);
-
-  return {
-    root,
-    parts: { hip, legL, legR, torso, armL, armR, head, umbrella: umbrellaGroup },
-    height: H,
-    phase: Math.random() * Math.PI * 2,
-    speedScale: 0.94 + Math.random() * 0.14,
-  };
-}
-
-/* 腿部摆动 + 身体上下起伏 */
-export function animatePerson(p, walkPhase, opts = {}) {
-  const { moving = true, idleAmp = 0.5 } = opts;
-  const { legL, legR, armL, armR, hip, torso, head } = p.parts;
-
-  if (!moving) {
-    // 站立：轻微呼吸 + 偶发换重心
-    const t = walkPhase * 0.18;
-    legL.rotation.x = Math.sin(t) * 0.012;
-    legR.rotation.x = -Math.sin(t) * 0.012;
-    armL.rotation.x = Math.sin(t * 0.8) * 0.05;
-    armR.rotation.x = (armR.rotation.x < -0.4) ? -0.55 : -Math.sin(t * 0.8) * 0.05;
-    torso.rotation.z = Math.sin(t * 0.5) * 0.012;
-    head.rotation.y = Math.sin(t * 0.34) * 0.16;
-    hip.position.y = p.height * 0.44;
-    return;
-  }
-
-  const s = Math.sin(walkPhase);
-  const c = Math.cos(walkPhase * 2);
-
-  legL.rotation.x = s * 0.52;
-  legR.rotation.x = -s * 0.52;
-
-  // 手臂反相摆动（打伞的那只手保持不动）
-  const armSwing = -s * 0.38;
-  armL.rotation.x = armSwing;
-  if (armR.userData.holdingUmbrella) {
-    armR.rotation.x = -0.55;
-  } else {
-    armR.rotation.x = -armSwing;
-  }
-
-  // 髋部上下起伏（每步一次）
-  hip.position.y = p.height * 0.44 + Math.abs(c) * p.height * 0.012;
-  // 躯干轻微左右摇
-  torso.rotation.z = s * 0.035;
-  torso.rotation.y = -s * 0.05;
-  // 头轻微点头
-  head.rotation.x = Math.abs(c) * 0.03;
-  head.rotation.y = -torso.rotation.y * 0.6;
-}
-
-/* =========================================================
-   行人路径：路径点是世界坐标 [x, z]，行人沿折线循环行走
-   ========================================================= */
-export function makeWalker(parent, pathPts, opts = {}) {
-  const { loop = true, speed = 1.05, personOpts = {}, pauseAt = null } = opts;
-
-  const person = buildPerson(personOpts);
-  if (person.parts.umbrella) {
-    person.parts.armR.userData.holdingUmbrella = true;
-    person.parts.armR.rotation.x = -0.55;
-  }
-  parent.add(person.root);
-
-  // 路径总长
-  const segs = [];
-  let total = 0;
-  for (let i = 0; i < pathPts.length - 1; i++) {
-    const [x0, z0] = pathPts[i];
-    const [x1, z1] = pathPts[i + 1];
-    const len = Math.hypot(x1 - x0, z1 - z0);
-    segs.push({ x0, z0, x1, z1, len, start: total });
-    total += len;
-  }
-
-  const w = {
-    person,
-    segs,
-    total,
-    t: Math.random() * total,
-    speed,
-    heading: 0,
-    paused: false,
-    pauseTimer: 0,
-    y: opts.y ?? 0.16,
-    groundY: opts.y ?? 0.16,
-    walkPhase: person.phase,
-    update(dt) {
-      if (this.paused) {
-        this.pauseTimer -= dt;
-        animatePerson(this.person, this.walkPhase, { moving: false });
-        if (this.pauseTimer <= 0) this.paused = false;
-        return;
-      }
-
-      this.t += this.speed * dt;
-      if (this.t > this.total) {
-        if (loop) this.t -= this.total;
-        else { this.t = this.total; }
-      }
-
-      // 定位到段
-      let seg = this.segs[this.segs.length - 1];
-      for (const s of this.segs) {
-        if (this.t >= s.start && this.t < s.start + s.len) { seg = s; break; }
-      }
-      const f = seg.len > 0 ? (this.t - seg.start) / seg.len : 0;
-      const x = seg.x0 + (seg.x1 - seg.x0) * f;
-      const z = seg.z0 + (seg.z1 - seg.z0) * f;
-      this.person.root.position.set(x, this.groundY, z);
-
-      // 朝向：朝运动方向，做角度插值避免拐点瞬转
-      const targetHeading = Math.atan2(seg.x1 - seg.x0, seg.z1 - seg.z0);
-      let diff = targetHeading - this.heading;
-      while (diff > Math.PI) diff -= Math.PI * 2;
-      while (diff < -Math.PI) diff += Math.PI * 2;
-      this.heading += diff * Math.min(1, dt * 5.0);
-      this.person.root.rotation.y = this.heading;
-
-      // 步频与速度挂钩
-      this.walkPhase += dt * this.speed * 5.4 * this.person.speedScale;
-      animatePerson(this.person, this.walkPhase, { moving: true });
-
-      // 随机驻足（看手机 / 看橱窗）
-      if (pauseAt && Math.random() < pauseAt * dt) {
-        this.paused = true;
-        this.pauseTimer = 1.5 + Math.random() * 3.0;
-      }
-    },
-  };
-  return w;
 }
 
 /* =========================================================
@@ -502,7 +549,7 @@ export function buildCar(opts = {}) {
   }
 
   /* 整车合批：车身所有静态部件按材质合并 */
-  mergeGroupByMaterial(root);
+  mergeDirectChildren(root);
 
   contactShadow(root, W * 1.7, L * 1.12, 0.55, 0, 0.004, 0);
 
