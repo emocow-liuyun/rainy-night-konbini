@@ -1,0 +1,33 @@
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+
+# 编辑器配置
+.vscode/
+.idea/
+*.sublime-*
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 构建 / 缓存
+dist/
+build/
+.cache/
+.parcel-cache/
+
+# 临时文件
+.tmp/
+tmp/
+*.log
+
+# 本地截图与调试产物
+shots/
+*.png
+!preview/web/*.jpg
