@@ -135,8 +135,9 @@ rainy-night-konbini/
 ├── index.html              entry point (ESM import map)
 ├── serve.py                local preview server
 ├── vendor/
-│   ├── three.module.js     three.js r170
-│   └── OrbitControls.js
+│   ├── three.module.js          three.js r170
+│   ├── OrbitControls.js
+│   └── BufferGeometryUtils.js   geometry merging
 └── src/
     ├── core.js             palette / toon materials / geometry cache / canvas textures
     ├── base.js             diorama base / roads / sidewalks / markings / puddles
@@ -144,6 +145,7 @@ rainy-night-konbini/
     ├── props.js            vending machines / bicycles / lamps / poles / signs / guardrails / alley / traffic light
     ├── effects.js          rain / splashes / drips / ripples / glass runoff / flicker / backdrop rain
     ├── atmos.js            night sky dome / city silhouettes / horizon haze
+    ├── batch.js            static geometry merging (draw-call reduction)
     └── main.js             renderer / planar reflection / post-processing / animation loop
 ```
 
@@ -161,16 +163,46 @@ Camera override via query string:
 
 - `?refl=1` — output the reflection buffer directly
 - `?hide=lamp,gondola` — hide subtrees by object name
+- `?debug=1` — expose `window.__KONBINI` for profiling (draw calls, object counts)
 
 ---
 
 ## Performance
 
-- Adaptive resolution: sustained low frame times step `pixelRatio` down to a floor of 1.0
-- Wet-ground reflection defaults to half resolution; raise `REFL_SCALE` in `main.js` to `0.75` or `1.0`
-- Rain count is the `buildRain({ count })` argument in `main.js`
+### The interesting part
 
-Measured at a stable 60 fps on an RTX 5070 at 1600 × 1000.
+The first version rendered at a smooth 60 fps while pinning a CPU core — and barely touching the GPU. That combination is a tell: the bottleneck was submission, not pixels.
+
+Profiling confirmed it. The GPU was idling at ~3%, while `getParameters()` inside three.js ate roughly 25% of CPU samples — the bookkeeping three.js does per material, per frame, to decide which shader program to bind.
+
+Two causes, both fixed:
+
+1. **Every shelf tier cloned its own material.** A `.clone()` on a material mints a new UUID, so three.js treats it as a distinct program candidate and re-derives its parameter object every frame. Replacing the clones with six quantised shared variants made that cost vanish.
+2. **900+ independent meshes.** Each one is a draw call. Static geometry is now merged by material, with world transforms baked into the vertices.
+
+| Metric | Before | After |
+|---|---|---|
+| Draw calls / frame | 2,595 | **449** |
+| Meshes in scene | 914 | **378** |
+| Realtime point lights | 19 | **10** |
+| CPU main-thread busy | 44% | **27%** |
+| Frame rate | 60 fps | 60 fps |
+
+### What else changed
+
+- **Static batching** (`src/batch.js`) — merges by material into 38 batches. Only genuinely animated objects are excluded: the automatic door leaves, the sign face, the traffic lamps, interior point lights, distant window glow. Transparent additive quads with `depthWrite === false` are safe to batch too, since additive blending is order-independent.
+- **Lights 19 → 10** — street lamps, the traffic light, vending machines and the rear-door lamp no longer use realtime point lights. They're carried by emissive materials, additive light-pool decals and bloom. Ground pools and interior emissive fills were strengthened to compensate, so the look is unchanged.
+- **Staggered passes** — wet-ground reflection refreshes every 2 frames, the normal/depth buffer (used for outlines) every 3. The geometry and lights are effectively static, so redrawing the whole scene every frame was pure waste.
+
+### Tunables
+
+- `REFL_SCALE` in `main.js` — reflection resolution, default `0.4`; raise to `0.75` or `1.0`
+- `NORMAL_INTERVAL` / `REFL_INTERVAL` — pass refresh intervals
+- `buildRain({ count })` — rain streak count, default 5,200
+
+Adaptive resolution steps `pixelRatio` down to a floor of 1.0 on sustained slow frames.
+
+Measured at a stable 60 fps on an RTX 5070 at 1600 × 1000, p95 frame interval 16.7 ms.
 
 ## Technical notes
 

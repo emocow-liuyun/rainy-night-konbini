@@ -327,18 +327,52 @@ function clipStripTex() {
   });
 }
 
+/* ---------------- 共享的货架/杂志材质（离散变体，避免每层 clone） ---------------- */
+const _goodsMatCache = new Map();
+function goodsMatFor(width) {
+  // 把宽度量化到 0.5 的整数倍，最多 6 档，材质总数因此固定
+  const rep = Math.max(1, Math.min(6, Math.round(width / 0.6)));
+  if (_goodsMatCache.has(rep)) return _goodsMatCache.get(rep);
+  const tex = goodsTexBase();
+  const t = tex.clone();
+  t.needsUpdate = true;
+  t.wrapS = THREE.RepeatWrapping;
+  t.wrapT = THREE.ClampToEdgeWrapping;
+  t.repeat.set(rep, 1);
+  const mat = toon(0xdad4c4, { map: t, steps: [0.52, 0.72, 0.88, 0.96, 1.0], emissive: 0x2a2519, emissiveIntensity: 1.0 });
+  _goodsMatCache.set(rep, mat);
+  return mat;
+}
+
+let _goodsTexBase = null;
+function goodsTexBase() {
+  if (!_goodsTexBase) _goodsTexBase = shelfGoodsTex();
+  return _goodsTexBase;
+}
+
+let _magMat = null;
+function magazineMat() {
+  if (_magMat) return _magMat;
+  const t = magazineTex();
+  t.needsUpdate = true;
+  t.wrapS = THREE.RepeatWrapping;
+  t.repeat.set(4, 1);
+  _magMat = toon(0xd8d2c2, { map: t, steps: [0.48, 0.70, 0.88, 1.0] });
+  return _magMat;
+}
+
 /* ================= 建筑主体 ================= */
 export function buildStore(root, lights) {
   const g = group(root, 'store');
   const G = {}; // 返回可动效部件
 
   const wallMat = toon(C.wall, { steps: [0.55, 0.78, 0.92, 1.0] });
-  const wallSide = toon(0xd8d0be, { steps: [0.50, 0.70, 0.86, 0.96, 1.0] });
-  const wallDim = toon(0xd4ccb8, { steps: [0.50, 0.70, 0.86, 0.96, 1.0] });
+  const wallSide = toon(0xd8d0be, { steps: [0.50, 0.70, 0.86, 0.96, 1.0], emissive: 0x2c2618, emissiveIntensity: 1.0 });
+  const wallDim = toon(0xd4ccb8, { steps: [0.50, 0.70, 0.86, 0.96, 1.0], emissive: 0x2a2418, emissiveIntensity: 1.0 });
 
   /* ---------- 地面 ---------- */
   const ft = floorTileTex();
-  const floorMat = toon(0xc4bcaa, { map: ft, steps: [0.52, 0.72, 0.86, 0.96, 1.0] });
+  const floorMat = toon(0xc4bcaa, { map: ft, steps: [0.52, 0.72, 0.86, 0.96, 1.0], emissive: 0x241f14, emissiveIntensity: 1.0 });
   box(g, X1 - X0, 0.16, Z1 - Z0, floorMat, (X0 + X1) / 2, FLOOR - 0.08, (Z0 + Z1) / 2);
   // 入口地垫
   const matTex = canvasTex(256, 128, (ctx, w, h) => {
@@ -357,7 +391,7 @@ export function buildStore(root, lights) {
 
   /* ---------- 天花板 ---------- */
   const ct = ceilTex();
-  const ceilMat = toon(0xbcc2be, { map: ct, steps: [0.48, 0.68, 0.84, 0.95, 1.0] });
+  const ceilMat = toon(0xbcc2be, { map: ct, steps: [0.48, 0.68, 0.84, 0.95, 1.0], emissive: 0x2e2c26, emissiveIntensity: 1.0 });
   box(g, X1 - X0, 0.10, Z1 - Z0, ceilMat, (X0 + X1) / 2, H - 0.05, (Z0 + Z1) / 2);
 
   /* ---------- 后墙 / 侧墙 ---------- */
@@ -412,11 +446,9 @@ export function buildStore(root, lights) {
   // 重新放招牌面到前面
   sign.position.z = Z1 + 0.13;
 
-  // 招牌灯（向下打光）
-  const signLight = new THREE.PointLight(0xffe6c0, 6, 6, 2);
-  signLight.position.set((X0 + X1) / 2, H - 0.2, Z1 + 0.9);
-  g.add(signLight);
-  G.signLight = signLight;
+  /* 招牌不额外投点光：灯箱面自身亮度配合 Bloom 已足够，
+     门口亮度由雨棚灯带（自发光）与地面光池贴片承载。 */
+  G.signLight = null;
 
   /* ---------- 店招侧灯箱（侧街可见） ---------- */
   const sideBoxTex = canvasTex(512, 128, (ctx, w, h) => {
@@ -565,16 +597,10 @@ export function buildStore(root, lights) {
       g.add(panel);
     }
   }
-  for (const [x, z] of [[0.9, -1.0], [3.6, -2.4], [5.8, -1.2], [2.0, -4.6], [5.4, -4.7]]) {
-    const L = new THREE.PointLight(0xfff2dc, 4.6, 6.4, 2);
-    L.position.set(x, H - 0.26, z);
-    g.add(L);
-    ceilingLights.push(L);
-  }
-  // 店内补光：贴近玻璃的暖光，让店内氛围透出（模拟天花板漫反射）
-  for (const [x, z, inten] of [[1.6, 0.10, 2.2], [4.8, 0.10, 2.0], [3.2, -3.2, 2.4]]) {
-    const L = new THREE.PointLight(0xffe0b0, inten, 6.0, 2);
-    L.position.set(x, 2.3, z);
+  // 店内主照明：4 盏，距离拉远以覆盖整个卖场（原 8 盏已合并）
+  for (const [x, z, inten] of [[2.0, -0.6, 11.5], [4.9, -0.6, 10.5], [2.0, -3.9, 10.8], [4.9, -3.9, 10.0]]) {
+    const L = new THREE.PointLight(0xfff2dc, inten, 9.5, 2);
+    L.position.set(x, H - 0.30, z);
     g.add(L);
     ceilingLights.push(L);
   }
@@ -635,9 +661,7 @@ export function buildStore(root, lights) {
     // 后门台阶 + 小灯
     box(g, 0.62, 0.14, 1.02, toon(0x9a9384, { steps: [0.46, 0.72, 0.92, 1] }), X0 + 0.5, 0.07, Z0 - 0.30);
     add(g, new THREE.CylinderGeometry(0.055, 0.055, 0.10, 8), glowMat(0xffe0b0, 1.8), X0 + 0.5, 2.35, Z0 - 0.14, Math.PI / 2, 0, 0);
-    const dl = new THREE.PointLight(0xffcc96, 2.2, 2.6, 2);
-    dl.position.set(X0 + 0.5, 2.2, Z0 - 0.45);
-    g.add(dl);
+    /* 后门小灯改为纯自发光灯罩，省一盏点光 */
 
     // 墙脚油污 / 水渍（深色薄贴片）
     const stainTex = canvasTex(128, 128, (ctx, w, h) => {
@@ -694,15 +718,12 @@ function buildInterior(g, G) {
   // 冷柜顶箱
   box(IN, 5 * (FW + 0.05) + 0.1, 0.30, 0.34, toon(0xd6d9d2, { steps: [0.52, 0.78, 0.94, 1] }),
     FX0 + (5 * (FW + 0.05)) / 2 - 0.02, FLOOR + FH + 0.15, Z0 + 0.2);
-  // 冷柜内灯
-  const fl = new THREE.PointLight(0xbfe6ff, 5, 3.2, 2);
-  fl.position.set(3.4, 1.6, Z0 + 0.7); IN.add(fl);
+  // 冷柜已用自发光面板承载亮度，不再单独放点光（省一盏）
+
 
   /* ---------- 中岛：双排货架 ---------- */
-  const shelfMat = toon(0xc8c2b2, { steps: [0.50, 0.72, 0.88, 1.0] });
+  const shelfMat = toon(0xc8c2b2, { steps: [0.50, 0.72, 0.88, 1.0], emissive: 0x221e15, emissiveIntensity: 1.0 });
   const shelfSide = toon(0xaea89a, { steps: [0.46, 0.70, 0.88, 1] });
-  const goodsTex = shelfGoodsTex();
-  const goodsMat = toon(0xdad4c4, { map: goodsTex, steps: [0.52, 0.72, 0.88, 0.96, 1.0] });
 
   function gondola(cx, cz, len, ry = 0) {
     const gg = group(IN, 'gondola');
@@ -717,13 +738,8 @@ function buildInterior(g, G) {
       box(gg, 0.56, 0.035, len - 0.04, shelfMat, 0, y, 0);
       // 两面商品
       for (const side of [-1, 1]) {
-        const gtex = goodsTex.clone();
-        gtex.needsUpdate = true;
-        gtex.wrapS = THREE.RepeatWrapping;
-        gtex.repeat.set(Math.max(1, Math.round(len / 1.0)), 1);
-        const gm = goodsMat.clone();
-        gm.map = gtex;
-        const p = new THREE.Mesh(planeGeo(len - 0.12, 0.30), gm);
+        // 复用共享材质：贴图重复通过预生成的少量变体承载，避免每层都 clone 出唯一材质
+        const p = new THREE.Mesh(planeGeo(len - 0.12, 0.30), goodsMatFor(len));
         p.position.set(side * 0.255, y + 0.17, 0);
         p.rotation.y = side > 0 ? Math.PI / 2 : -Math.PI / 2;
         gg.add(p);
@@ -756,13 +772,7 @@ function buildInterior(g, G) {
   for (let s = 0; s < 4; s++) {
     const y = FLOOR + 0.30 + s * 0.36;
     box(wallShelf, 0.44, 0.035, 4.2, shelfMat, X1 - 0.35, y, -3.0);
-    const wsTex = goodsTex.clone();
-    wsTex.needsUpdate = true;
-    wsTex.wrapS = THREE.RepeatWrapping;
-    wsTex.repeat.set(4, 1);
-    const wsMat = goodsMat.clone();
-    wsMat.map = wsTex;
-    const p = new THREE.Mesh(planeGeo(4.1, 0.32), wsMat);
+    const p = new THREE.Mesh(planeGeo(4.1, 0.32), goodsMatFor(4.1));
     p.position.set(X1 - 0.55, y + 0.18, -3.0);
     p.rotation.y = -Math.PI / 2;
     wallShelf.add(p);
@@ -880,10 +890,7 @@ function buildInterior(g, G) {
   for (let i = 0; i < 3; i++) {
     const y = FLOOR + 0.86 + i * 0.34;
     const px = MX + 0.10 - i * 0.02;
-    const tex = magTex.clone(); tex.needsUpdate = true;
-    tex.wrapS = THREE.RepeatWrapping; tex.repeat.set(4, 1);
-    const m = new THREE.Mesh(planeGeo(Math.abs(magLen) - 0.1, 0.30),
-      toon(0xd8d2c2, { map: tex, steps: [0.48, 0.70, 0.88, 1.0] }));
+    const m = new THREE.Mesh(planeGeo(Math.abs(magLen) - 0.1, 0.30), magazineMat());
     m.position.set(px, y, (MZ0 + MZ1) / 2);
     m.rotation.y = Math.PI / 2;
     m.rotation.x = -0.42;

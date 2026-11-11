@@ -16,6 +16,7 @@ import {
   buildGlassRain, updateGlassRain, makeFlicker, buildBackdropRain, updateBackdropRain,
 } from './effects.js';
 import { buildSky, buildCityGlow, buildHorizonHaze } from './atmos.js';
+import { batchStatic } from './batch.js';
 import { toon, glowMat, box, canvasTex, JP_FONT } from './core.js';
 
 const QS = new URLSearchParams(location.search);
@@ -158,7 +159,7 @@ box(world, 3.6, 3.2, 2.0, bgMat, 9.8, 1.6, 0.4);
 /* =========================================================
    3. 湿地面反射（按地面高度分层，避免被铺装遮挡）
    ========================================================= */
-const REFL_SCALE = 0.5;
+const REFL_SCALE = 0.4;
 let rtReflect, reflectCam, wetLayerMat;
 
 function initReflection() {
@@ -408,6 +409,21 @@ hideInReflection = [
 ];
 
 /* =========================================================
+   4.5 静态几何合批 —— 把 900+ 个独立 Mesh 压成几十个
+       必须放在所有动画对象创建之后：这些对象要显式排除
+   ========================================================= */
+const protectFromBatch = [
+  ...(SG.doorL ? [SG.doorL, SG.doorR] : []),   // 自动门双扇
+  SG.sign,                                     // 招牌灯箱面（逐帧改色）
+  ...SG.ceilingLights,                         // 店内点光（呼吸）
+  traffic.group,                               // 信号灯（逐帧改色）
+  ...traffic.lamps.map(l => l.mesh),           // 三颗灯球
+  cityGlow,                                    // 远景窗光贴片
+];
+const batchInfo = batchStatic(world, { verbose: true, exclude: protectFromBatch });
+console.log('[batch] draw-call reduction:', batchInfo);
+
+/* =========================================================
    5. 后处理：法线/深度描边 + 泛光 + 调色
    ========================================================= */
 let rtScene, rtNormal, rtBright1, rtBright2, rtBloom1, rtBloom2;
@@ -637,6 +653,11 @@ function updateReflection() {
    ========================================================= */
 const clock = new THREE.Clock();
 let t = 0;
+/* 法线缓冲刷新间隔（帧）。1 = 每帧，2 = 隔帧 */
+const NORMAL_INTERVAL = 3;   // 法线/深度缓冲：每 3 帧刷新
+let normalTick = 0;
+const REFL_INTERVAL = 2;     // 湿地面反射：每 2 帧刷新（相机自转极慢，肉眼无差）
+let reflTick = 0;
 /* 自适应分辨率：连续低帧时降低 pixelRatio，保证可拖拽流畅 */
 const perf = { acc: 0, n: 0, done: false };
 function adaptPerf(dt) {
@@ -674,7 +695,7 @@ function animate() {
   /* --- 招牌闪烁 --- */
   const fv = flickerSign.update(dt);
   if (SG.signFace) SG.signFace.color.setScalar(fv * 1.62);
-  if (SG.signLight) SG.signLight.intensity = 6 * (0.9 + fv * 0.1);
+  // 招牌不再有独立点光，闪烁只作用于灯箱面材质
 
   /* --- 自动门 --- */
   door.next -= dt;
@@ -696,8 +717,10 @@ function animate() {
   traffic.lamps.forEach((l, i) => {
     l.mat.color.copy(new THREE.Color(l.base).multiplyScalar(i === active ? 2.6 : 0.14));
   });
-  traffic.light.color.set(traffic.colors[active]);
-  traffic.light.intensity = 1.6;
+  if (traffic.light) {
+    traffic.light.color.set(traffic.colors[active]);
+    traffic.light.intensity = 1.6;
+  }
   const walkOn = active === 2;
   traffic.walkMat.color.set(walkOn ? 0x34c759 : 0x1a3d26).multiplyScalar(walkOn ? 2.2 : 1.0);
   traffic.stopMat.color.set(walkOn ? 0x4a1c1c : 0xff3b30).multiplyScalar(walkOn ? 1.0 : 2.0);
@@ -714,13 +737,20 @@ function animate() {
   wetLayerMat.uniforms.uTime.value = t;
 
   /* --- 渲染 --- */
-  updateReflection();
+  /* 反射与法线缓冲按帧间隔刷新：几何与灯光几乎静止，
+     逐帧重绘整场景是纯 CPU 浪费。 */
+  reflTick = (reflTick + 1) % REFL_INTERVAL;
+  if (reflTick === 0) updateReflection();
 
-  scene.overrideMaterial = normalMat;
-  renderer.setRenderTarget(rtNormal);
-  renderer.clear(true, true, false);
-  renderer.render(scene, camera);
-  scene.overrideMaterial = null;
+  /* 法线/深度缓冲：几何是静态的，描边每 2 帧刷新一次即可（省一次全场景重绘） */
+  normalTick = (normalTick + 1) % NORMAL_INTERVAL;
+  if (normalTick === 0) {
+    scene.overrideMaterial = normalMat;
+    renderer.setRenderTarget(rtNormal);
+    renderer.clear(true, true, false);
+    renderer.render(scene, camera);
+    scene.overrideMaterial = null;
+  }
 
   renderer.setRenderTarget(rtScene);
   renderer.clear(true, true, false);
@@ -774,6 +804,32 @@ function animate() {
     kill.forEach(o => { if (o.parent) o.parent.remove(o); });
     console.log('[debug] removed', kill.map(o => o.name).join(' | '));
   }
+}
+
+/* 调试句柄：仅 ?debug=1 时暴露，供外部诊断 draw call / 分段耗时 */
+if (QS.has('debug')) {
+  window.__KONBINI = {
+    renderer, scene, camera, controls,
+    info: () => ({
+      calls: renderer.info.render.calls,
+      triangles: renderer.info.render.triangles,
+      geometries: renderer.info.memory.geometries,
+      textures: renderer.info.memory.textures,
+      programs: renderer.info.programs?.length ?? 0,
+    }),
+    countObjects: () => {
+      let mesh = 0, sprite = 0, light = 0, total = 0;
+      scene.traverse(o => {
+        total++;
+        if (o.isMesh) mesh++;
+        else if (o.isSprite) sprite++;
+        else if (o.isLight) light++;
+      });
+      return { total, mesh, sprite, light };
+    },
+    timings: () => window.__KONBINI._t || null,
+    _t: null,
+  };
 }
 
 animate();

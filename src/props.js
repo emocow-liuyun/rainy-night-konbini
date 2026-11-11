@@ -103,9 +103,7 @@ export function buildVendingMachine(parent, x, y, z, ry = 0, variant = 0) {
 
   // 前面溢光
   glowSprite(g, variant === 0 ? 0xffd0b0 : 0xb8e0ff, 2.6, 0.9, 0, 1.1, 0.55);
-  const light = new THREE.PointLight(variant === 0 ? 0xffd6b0 : 0xc2e4ff, 3.4, 3.2, 2);
-  light.position.set(0, 1.35, 0.85);
-  g.add(light);
+  /* 贩卖机面板已高亮自发光，溢光交给 glowSprite，不再放点光 */
 
   // 底部踢脚
   box(g, 1.04, 0.10, 0.74, toon(0x2a2f38, { steps: [0.4, 0.7, 1] }), 0, 0.05, 0);
@@ -204,18 +202,16 @@ export function buildStreetLamp(parent, x, z, ry = 0, h = 4.2) {
   const head = add(g, new THREE.CylinderGeometry(0.20, 0.10, 0.16, 12), poleMat, 0.78, h + 0.34, 0, 0, 0, 0.22);
   // 灯罩发光
   add(g, new THREE.CylinderGeometry(0.17, 0.17, 0.035, 12), glowMat(0xfff2d8, 3.0), 0.78, h + 0.245, 0);
-  // 灯光
-  const L = new THREE.PointLight(0xffecc8, 14, 9, 2);
-  L.position.set(0.78, h + 0.16, 0);
-  g.add(L);
-  glowSprite(g, 0xfff0d8, 2.2, 0.85, 0.78, h + 0.22, 0);
+  /* 路灯不再使用实时点光源：改由加法混合的光池贴片 + 灯头辉光承载。
+     3 盏路灯 × 每像素光照循环，是夜景里最不划算的开销。 */
+  glowSprite(g, 0xfff0d8, 2.2, 0.9, 0.78, h + 0.22, 0);
 
   // 地面光锥（软）
   const coneMat = new THREE.MeshBasicMaterial({
-    map: glowTexLocal(), color: new THREE.Color(0xffeccc).multiplyScalar(0.13),
+    map: glowTexLocal(), color: new THREE.Color(0xffeccc).multiplyScalar(0.95),
     transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
   });
-  const pool = new THREE.Mesh(planeGeo(5.6, 5.6), coneMat);
+  const pool = new THREE.Mesh(planeGeo(7.2, 7.2), coneMat);
   pool.rotation.x = -Math.PI / 2;
   pool.position.set(0.78, 0.03, 0);
   pool.renderOrder = 4;
@@ -459,11 +455,9 @@ export function buildTrafficLight(parent, x, z, ry = 0) {
   const stopMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(0xff3b30).multiplyScalar(1.8) });
   const stopLamp = add(g, planeGeo(0.14, 0.14), stopMat, 0.0, 2.60, 0.205);
 
-  const pl = new THREE.PointLight(0xff3b30, 1.6, 5, 2);
-  pl.position.set(1.05, 3.2, 0.2);
-  g.add(pl);
-
-  return { group: g, lamps, walkMat, stopMat, light: pl, colors: lampColors };
+  /* 信号灯同样不用实时点光：三颗灯球自身已设为高亮自发材质，
+     Bloom 会自然带出光晕，比一盏会移动的点光更省也更稳。 */
+  return { group: g, lamps, walkMat, stopMat, light: null, colors: lampColors };
 }
 
 /* ================= 电线掉落的水滴锚点（供动效用） ================= */
